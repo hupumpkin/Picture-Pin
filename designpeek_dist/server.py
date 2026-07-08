@@ -147,6 +147,76 @@ def get_local_ip():
         return "127.0.0.1"
 
 
+def _detect_image_ext(content: bytes, filename: str = "", content_type: str = "") -> str:
+    """Detect the real image extension from bytes, with filename/content-type fallback."""
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return ".webp"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(content) >= 12 and content[4:8] == b"ftyp":
+        brand = content[8:12].lower()
+        compatible = content[8:64].lower()
+        if brand in (b"heic", b"heix", b"hevc", b"hevx", b"heif", b"mif1", b"msf1") or b"heic" in compatible or b"heif" in compatible:
+            return ".heic"
+
+    ct = (content_type or "").lower()
+    if "png" in ct:
+        return ".png"
+    if "jpeg" in ct or "jpg" in ct:
+        return ".jpg"
+    if "webp" in ct:
+        return ".webp"
+    if "heic" in ct or "heif" in ct:
+        return ".heic"
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext in (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"):
+        return ".jpg" if ext == ".jpeg" else ext
+    return ".png"
+
+
+def _with_ext(path: str, ext: str) -> str:
+    root, _ = os.path.splitext(path)
+    return root + ext
+
+
+def save_uploaded_image(content: bytes, target_path: str, filename: str = "", content_type: str = "") -> str:
+    """Save uploaded image bytes, converting iPhone HEIC/HEIF to browser-friendly PNG."""
+    ext = _detect_image_ext(content, filename, content_type)
+
+    if ext in (".heic", ".heif"):
+        final_path = _with_ext(target_path, ".png")
+        tmp_path = final_path + f".{uuid.uuid4().hex[:6]}.heic"
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        try:
+            result = subprocess.run(
+                ["sips", "-s", "format", "png", tmp_path, "--out", final_path],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and os.path.exists(final_path):
+                print("  ↳ 已将 iPhone HEIC 图片转换为 PNG")
+                return final_path
+            print(f"  ⚠ HEIC 转 PNG 失败，保留原图: {result.stderr.strip() or result.stdout.strip()}")
+            fallback_path = _with_ext(target_path, ".heic")
+            os.replace(tmp_path, fallback_path)
+            return fallback_path
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    final_path = _with_ext(target_path, ext)
+    with open(final_path, "wb") as f:
+        f.write(content)
+    return final_path
+
+
 # ── API: Upload (auto from iPhone shortcut & manual from web) ────────
 
 @app.post("/api/upload")
@@ -157,8 +227,8 @@ async def api_upload(file: UploadFile = File(...)):
     path = os.path.join(INBOX_DIR, name)
 
     content = await file.read()
-    with open(path, "wb") as f:
-        f.write(content)
+    path = save_uploaded_image(content, path, file.filename, file.content_type or "")
+    name = os.path.basename(path)
 
     print(f"  ✓ 收到截图: {name}  ({len(content) / 1024:.0f} KB)")
     _schedule_ocr(path)
@@ -181,8 +251,8 @@ async def api_upload_base64(req: Request):
     name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}{ext}"
     path = os.path.join(INBOX_DIR, name)
 
-    with open(path, "wb") as f:
-        f.write(content)
+    path = save_uploaded_image(content, path, filename)
+    name = os.path.basename(path)
 
     print(f"  ✓ 收到截图(base64): {name}  ({len(content) / 1024:.0f} KB)")
     _schedule_ocr(path)
@@ -215,8 +285,8 @@ async def api_upload_image(req: Request):
         name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
         path = os.path.join(INBOX_DIR, name)
 
-    with open(path, "wb") as f:
-        f.write(content)
+    path = save_uploaded_image(content, path, name, req.headers.get("content-type", ""))
+    name = os.path.basename(path)
 
     print(f"  ✓ 收到截图: {name}  ({len(content) / 1024:.0f} KB)")
     _schedule_ocr(path)
@@ -236,8 +306,8 @@ async def api_upload_raw(req: Request):
     name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
     path = os.path.join(INBOX_DIR, name)
 
-    with open(path, "wb") as f:
-        f.write(content)
+    path = save_uploaded_image(content, path, name)
+    name = os.path.basename(path)
 
     print(f"  ✓ 收到截图(raw): {name}  ({len(content) / 1024:.0f} KB)")
     _schedule_ocr(path)
@@ -370,6 +440,18 @@ async def api_delete(req: Request):
     for sid in deleted:
         analysis.pop(sid, None)
     save_analysis(analysis)
+
+    # Also remove deleted screenshots from projects to avoid stale empty cards.
+    projects = load_projects()
+    projects_changed = False
+    for proj in projects.values():
+        screenshots = proj.get("screenshots", {})
+        for sid in deleted:
+            if sid in screenshots:
+                screenshots.pop(sid, None)
+                projects_changed = True
+    if projects_changed:
+        save_projects(projects)
 
     return {"ok": True, "deleted": deleted}
 

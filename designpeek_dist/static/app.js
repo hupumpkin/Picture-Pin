@@ -93,16 +93,20 @@ let state = {
   searchQuery: '',
   searchResults: null,
   manageMode: false,
+  screenshotSignature: '',
+  autoRefreshTimer: null,
 };
 
 // ── Init ─────────────────────────────────────────────────
 
 async function init() {
   await Promise.all([loadStats(), loadScreenshots(), loadProjects()]);
+  state.screenshotSignature = buildScreenshotSignature(state.screenshots);
   renderAppFilters();
   setupTabs();
   setupProjectFilters();
   checkAndroidStatus();
+  startRealtimeRefresh();
 
   // Restore last tab from sessionStorage
   const lastTab = sessionStorage.getItem('dp_tab');
@@ -166,6 +170,11 @@ function switchTab(tab) {
 async function loadStats() {
   const res = await fetch('/api/stats');
   state.stats = await res.json();
+  applyStatsToSidebar();
+}
+
+function applyStatsToSidebar() {
+  if (!state.stats) return;
   document.getElementById('countInbox').textContent = state.stats.inbox_count || 0;
   document.getElementById('countAll').textContent =
     (state.stats.inbox_count || 0) + (state.stats.organized_count || 0);
@@ -177,6 +186,7 @@ async function loadStats() {
 async function loadScreenshots() {
   const res = await fetch('/api/screenshots?limit=500');
   state.screenshots = await res.json();
+  state.screenshotSignature = buildScreenshotSignature(state.screenshots);
   updateFavoritesCount();
   if (state.currentTab === 'screenshots') renderGrid();
 }
@@ -186,6 +196,77 @@ async function loadProjects() {
   state.projects = await res.json();
   updateProjectCounts();
   renderProjectNav();
+}
+
+function buildScreenshotSignature(items) {
+  return items.map(s => [
+    s.id,
+    s.path,
+    s.mtime,
+    s.status,
+    s.app || '',
+    s.page_type || '',
+    s.analysis?.favorite ? 'fav' : '',
+    s.analysis?.note || '',
+  ].join(':')).join('|');
+}
+
+function isInteractionBusy() {
+  const modalIds = [
+    'lightbox',
+    'createProjectModal',
+    'addScreenshotsModal',
+    'importProjectModal',
+    'phoneGuideModal',
+    'pathEditorModal',
+  ];
+  return state.batchMode || modalIds.some(id => {
+    const el = document.getElementById(id);
+    return el && el.style.display === 'flex';
+  });
+}
+
+function startRealtimeRefresh() {
+  if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+  state.autoRefreshTimer = setInterval(autoRefreshScreenshots, 2500);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) autoRefreshScreenshots();
+  });
+}
+
+async function autoRefreshScreenshots() {
+  if (document.hidden || isInteractionBusy()) return;
+  try {
+    const [statsRes, screenshotsRes] = await Promise.all([
+      fetch('/api/stats'),
+      fetch('/api/screenshots?limit=500'),
+    ]);
+    const [stats, screenshots] = await Promise.all([
+      statsRes.json(),
+      screenshotsRes.json(),
+    ]);
+    const nextSignature = buildScreenshotSignature(screenshots);
+    if (nextSignature === state.screenshotSignature) return;
+
+    const previousIds = new Set(state.screenshots.map(s => s.id));
+    const newCount = screenshots.filter(s => !previousIds.has(s.id)).length;
+
+    state.stats = stats;
+    state.screenshots = screenshots;
+    state.screenshotSignature = nextSignature;
+    applyStatsToSidebar();
+    updateFavoritesCount();
+    renderAppFilters();
+
+    if (state.currentTab === 'screenshots') {
+      renderGrid();
+      if (newCount > 0) showToast(`已同步 ${newCount} 张新截图`);
+    } else if (state.currentTab === 'projects' && !state.currentProject) {
+      renderProjectList();
+    }
+  } catch (err) {
+    // Keep polling quiet; the next successful tick will catch up.
+  }
 }
 
 function updateProjectCounts() {
@@ -361,6 +442,7 @@ function renderGrid() {
                data-id="${s.id}" data-month="${g.key}"
                draggable="${canDrag ? 'true' : 'false'}"
                ondragstart="${canDrag ? `dragStart(event, '${s.id}')` : ''}"
+               oncontextmenu="showScreenshotContextMenu(event, this.dataset.id)"
                onclick="${state.batchMode ? `toggleCard('${s.id}', event)` : `openLightbox('${s.id}')`}">
             <div class="check">✓</div>
             ${s.analysis?.note ? '<div class="note-dot"></div>' : ''}
@@ -602,6 +684,68 @@ async function batchDelete() {
     renderGrid();
   }
 }
+
+// ── Context Menu: Delete Screenshot ─────────────────────
+
+function hideScreenshotContextMenu() {
+  const existing = document.querySelector('.screenshot-context-menu');
+  if (existing) existing.remove();
+}
+
+function showScreenshotContextMenu(event, id) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (state.batchMode) return;
+
+  hideScreenshotContextMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'screenshot-context-menu';
+  menu.innerHTML = `
+    <button class="context-menu-item danger">
+      <span>删除截图</span>
+    </button>
+  `;
+  menu.querySelector('button').addEventListener('click', () => deleteSingleScreenshot(id));
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(event.clientX, window.innerWidth - rect.width - 8);
+  const top = Math.min(event.clientY, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+}
+
+async function deleteSingleScreenshot(id) {
+  hideScreenshotContextMenu();
+  if (!confirm('确定删除这张截图？此操作不可撤销。')) return;
+
+  const res = await fetch('/api/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [id] }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('删除失败: ' + (data.error || '未知错误'));
+    return;
+  }
+
+  state.selected.delete(id);
+  await Promise.all([loadStats(), loadScreenshots(), loadProjects()]);
+  renderAppFilters();
+  if (state.currentProject) {
+    state.currentProject = state.projects.find(p => p.id === state.currentProject.id) || null;
+    if (state.currentProject) renderProjectDetail();
+    else renderProjectList();
+  } else {
+    renderGrid();
+  }
+  showToast('已删除截图');
+}
+
+document.addEventListener('click', hideScreenshotContextMenu);
+document.addEventListener('scroll', hideScreenshotContextMenu, true);
 
 // ── Batch: Import to Project ─────────────────────────────
 
