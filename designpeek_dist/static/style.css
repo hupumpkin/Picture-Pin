@@ -79,6 +79,11 @@ body {
   flex-shrink: 0;
 }
 
+.batch-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 /* ── Search ─────────────────────────────── */
 
 .search-box {

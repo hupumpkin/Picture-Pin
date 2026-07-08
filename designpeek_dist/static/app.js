@@ -405,7 +405,7 @@ function renderFolderFilters() {
 }
 
 async function createFolder() {
-  const name = prompt('新建项目文件夹名称');
+  const name = prompt('新建素材文件夹名称');
   if (!name || !name.trim()) return;
 
   const res = await fetch('/api/folders', {
@@ -425,13 +425,13 @@ async function createFolder() {
   }
   highlightFilters();
   renderGrid();
-  showToast('文件夹已创建');
+  showToast('素材文件夹已创建');
 }
 
 async function renameFolder(fid) {
   const folder = getFolder(fid);
   if (!folder) return;
-  const name = prompt('重命名项目文件夹', folder.name);
+  const name = prompt('重命名素材文件夹', folder.name);
   if (!name || !name.trim() || name.trim() === folder.name) return;
 
   const res = await fetch(`/api/folders/${fid}`, {
@@ -446,13 +446,13 @@ async function renameFolder(fid) {
   }
   await loadFolders();
   highlightFilters();
-  showToast('文件夹已重命名');
+  showToast('素材文件夹已重命名');
 }
 
 async function deleteFolder(fid) {
   const folder = getFolder(fid);
   if (!folder) return;
-  if (!confirm(`确定删除「${folder.name}」文件夹？\n截图文件会保留，只删除这个文件夹记录。`)) return;
+  if (!confirm(`确定删除「${folder.name}」素材文件夹？\n截图文件会保留，只删除这个文件夹记录。`)) return;
 
   const res = await fetch(`/api/folders/${fid}`, { method: 'DELETE' });
   const data = await res.json();
@@ -464,7 +464,7 @@ async function deleteFolder(fid) {
   await loadFolders();
   highlightFilters();
   renderGrid();
-  showToast('文件夹已删除，截图已保留');
+  showToast('素材文件夹已删除，截图已保留');
 }
 
 async function addScreenshotsToFolder(fid, ids) {
@@ -478,12 +478,12 @@ async function addScreenshotsToFolder(fid, ids) {
   });
   const data = await res.json();
   if (!data.ok) {
-    showToast('调入失败: ' + (data.error || '未知错误'));
+    showToast('移入文件夹失败: ' + (data.error || '未知错误'));
     return;
   }
   await loadFolders();
   renderFolderFilters();
-  showToast(`已调入 ${uniqueIds.length} 张`);
+  showToast(`已移入文件夹 ${uniqueIds.length} 张`);
 }
 
 document.querySelectorAll('#statusFilters .filter-item').forEach(item => {
@@ -741,16 +741,16 @@ function renderBatchFolderBtns() {
   const el = document.getElementById('batchFolderBtns');
   if (!el) return;
   if (!state.folders.length) {
-    el.innerHTML = '<button class="btn btn-primary btn-sm" onclick="createFolder()">+ 新建文件夹</button>';
+    el.innerHTML = '';
     return;
   }
   const maxShow = 2;
   let html = '';
   state.folders.slice(0, maxShow).forEach(f => {
-    html += `<button class="btn btn-primary btn-sm" onclick="batchMoveToFolder('${f.id}')">调入${escapeHtml(f.name)}</button>`;
+    html += `<button class="btn btn-primary btn-sm" onclick="batchMoveToFolder('${f.id}')">移入${escapeHtml(f.name)}</button>`;
   });
   if (state.folders.length > maxShow) {
-    html += '<button class="btn btn-secondary btn-sm" onclick="batchMoveToFolderPrompt()">调入其他文件夹</button>';
+    html += '<button class="btn btn-secondary btn-sm" onclick="batchMoveToFolderPrompt()">移入其他文件夹</button>';
   }
   el.innerHTML = html;
 }
@@ -763,7 +763,7 @@ async function batchMoveToFolder(fid) {
 async function batchMoveToFolderPrompt() {
   if (!state.selected.size) return;
   const names = state.folders.map((f, i) => `${i + 1}. ${f.name}`).join('\n');
-  const input = prompt(`输入文件夹序号或名称：\n${names}`);
+  const input = prompt(`输入素材文件夹序号或名称：\n${names}`);
   if (!input) return;
   const trimmed = input.trim();
   const idx = Number(trimmed);
@@ -771,7 +771,7 @@ async function batchMoveToFolderPrompt() {
     ? state.folders[idx - 1]
     : state.folders.find(f => f.name === trimmed);
   if (!folder) {
-    showToast('没有找到这个文件夹');
+    showToast('没有找到这个素材文件夹');
     return;
   }
   await batchMoveToFolder(folder.id);
@@ -781,16 +781,16 @@ function renderBatchProjectBtns() {
   const el = document.getElementById('batchProjectBtns');
   const projects = state.projects;
   if (!projects.length) {
-    el.innerHTML = '<button class="btn btn-primary btn-sm" onclick="showCreateProject()">+ 创建新项目</button>';
+    el.innerHTML = '<span class="batch-hint">暂无分析项目</span>';
     return;
   }
   const maxShow = 2;
-  let html = '<button class="btn btn-primary btn-sm" onclick="showCreateProject()">+ 创建新项目</button>';
+  let html = '';
   projects.slice(0, maxShow).forEach(p => {
-    html += `<button class="btn btn-primary btn-sm" onclick="batchImportToProject('${p.id}')">导入${escapeHtml(p.name)}</button>`;
+    html += `<button class="btn btn-secondary btn-sm" onclick="batchImportToProject('${p.id}')">加入${escapeHtml(p.name)}</button>`;
   });
   if (projects.length > maxShow) {
-    html += '<button class="btn btn-secondary btn-sm" onclick="batchImportProject()">导入其他项目</button>';
+    html += '<button class="btn btn-secondary btn-sm" onclick="batchImportProject()">加入其他分析项目</button>';
   }
   el.innerHTML = html;
 }
@@ -804,7 +804,7 @@ async function _doImportToProject(pid) {
   });
   const data = await res.json();
   if (!data.ok) {
-    showToast('导入失败: ' + (data.error || '未知错误'));
+    showToast('加入分析项目失败: ' + (data.error || '未知错误'));
     return false;
   }
   state.selected.clear();
@@ -820,7 +820,7 @@ async function batchImportToProject(pid) {
   if (!state.selected.size) return;
   const count = state.selected.size;
   if (await _doImportToProject(pid)) {
-    showToast(`已导入 ${count} 张`);
+    showToast(`已加入分析项目 ${count} 张`);
   }
 }
 
@@ -1091,7 +1091,7 @@ function batchImportProject() {
   state.importTargetPid = null;
   const el = document.getElementById('importProjectList');
   if (!state.projects.length) {
-    el.innerHTML = '<div class="nav-empty">暂无项目，请先新建</div>';
+    el.innerHTML = '<div class="nav-empty">暂无分析项目，请先到「分析」页创建</div>';
   } else {
     el.innerHTML = state.projects.map(p => `
       <div class="nav-item" onclick="selectImportTarget('${p.id}', this)">
@@ -1121,7 +1121,7 @@ async function confirmImportProject() {
   const count = state.selected.size;
   hideImportProject();
   if (await _doImportToProject(state.importTargetPid)) {
-    showToast(`已导入 ${count} 张到项目`);
+    showToast(`已加入分析项目 ${count} 张`);
   }
 }
 
@@ -1164,7 +1164,7 @@ function renderProjectList() {
           <div class="quick-project-title">今天导入了 <strong>${todayUnassigned.length}</strong> 张新截图</div>
           <div class="quick-project-hint">点击基于这些截图创建分析项目</div>
         </div>
-        <button class="btn btn-primary btn-sm" style="flex-shrink:0;">创建新项目</button>
+        <button class="btn btn-primary btn-sm" style="flex-shrink:0;">创建分析项目</button>
       </div>
       <div class="quick-thumbs">${thumbs}</div>
     </div>`;
