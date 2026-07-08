@@ -85,6 +85,8 @@ let state = {
   stats: null,
   currentTab: 'screenshots',
   projects: [],
+  folders: [],
+  currentFolderId: null,
   currentProject: null,
   projectFilter: 'all',
   modalSelected: new Set(),
@@ -95,16 +97,20 @@ let state = {
   manageMode: false,
   screenshotSignature: '',
   autoRefreshTimer: null,
+  lasso: null,
+  suppressNextCardClick: false,
 };
 
 // ── Init ─────────────────────────────────────────────────
 
 async function init() {
-  await Promise.all([loadStats(), loadScreenshots(), loadProjects()]);
+  await Promise.all([loadStats(), loadScreenshots(), loadProjects(), loadFolders()]);
   state.screenshotSignature = buildScreenshotSignature(state.screenshots);
   renderAppFilters();
+  renderFolderFilters();
   setupTabs();
   setupProjectFilters();
+  setupLassoSelection();
   checkAndroidStatus();
   startRealtimeRefresh();
 
@@ -196,6 +202,13 @@ async function loadProjects() {
   state.projects = await res.json();
   updateProjectCounts();
   renderProjectNav();
+}
+
+async function loadFolders() {
+  const res = await fetch('/api/folders');
+  state.folders = await res.json();
+  renderFolderFilters();
+  if (state.batchMode) renderBatchFolderBtns();
 }
 
 function buildScreenshotSignature(items) {
@@ -328,6 +341,7 @@ function renderAppFilters() {
     item.addEventListener('click', () => {
       state.filter.app = state.filter.app === item.dataset.app ? null : item.dataset.app;
       state.filter.status = 'all';
+      state.currentFolderId = null;
       state.tagFilter = null;
       highlightFilters();
       renderGrid();
@@ -337,16 +351,146 @@ function renderAppFilters() {
     item.addEventListener('drop', (e) => {
       e.preventDefault();
       item.classList.remove('drop-target');
-      const sid = e.dataTransfer.getData('text/plain');
-      if (sid) quickClassify(sid, item.dataset.app);
+      const ids = getDraggedScreenshotIds(e);
+      const sid = ids[0];
+      const ss = state.screenshots.find(s => s.id === sid);
+      if (sid && ids.length === 1 && ss?.status === 'inbox') quickClassify(sid, item.dataset.app);
     });
   });
+}
+
+function getFolder(fid) {
+  return state.folders.find(f => f.id === fid);
+}
+
+function renderFolderFilters() {
+  const el = document.getElementById('folderFilters');
+  if (!el) return;
+
+  if (!state.folders.length) {
+    el.innerHTML = '<div class="nav-empty">暂无文件夹</div>';
+    return;
+  }
+
+  el.innerHTML = state.folders.map(f => {
+    const count = (f.screenshots || []).length;
+    return `<div class="filter-item folder-filter ${state.currentFolderId === f.id ? 'active' : ''}"
+      data-folder-id="${f.id}" title="右键可重命名或删除">
+      <span>📁 ${escapeHtml(f.name)}</span><span class="count">${count}</span>
+    </div>`;
+  }).join('');
+
+  el.querySelectorAll('.folder-filter').forEach(item => {
+    const fid = item.dataset.folderId;
+    item.addEventListener('click', () => {
+      state.currentFolderId = state.currentFolderId === fid ? null : fid;
+      state.filter.status = 'all';
+      state.filter.app = null;
+      highlightFilters();
+      renderGrid();
+    });
+    item.addEventListener('contextmenu', (e) => showFolderContextMenu(e, fid));
+    item.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      item.classList.add('drop-target');
+    });
+    item.addEventListener('dragleave', () => item.classList.remove('drop-target'));
+    item.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      item.classList.remove('drop-target');
+      const ids = getDraggedScreenshotIds(e);
+      if (ids.length) await addScreenshotsToFolder(fid, ids);
+    });
+  });
+}
+
+async function createFolder() {
+  const name = prompt('新建项目文件夹名称');
+  if (!name || !name.trim()) return;
+
+  const res = await fetch('/api/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('创建失败: ' + (data.error || '未知错误'));
+    return;
+  }
+  await loadFolders();
+  state.currentFolderId = data.folder.id;
+  if (state.batchMode && state.selected.size) {
+    await addScreenshotsToFolder(data.folder.id, [...state.selected]);
+  }
+  highlightFilters();
+  renderGrid();
+  showToast('文件夹已创建');
+}
+
+async function renameFolder(fid) {
+  const folder = getFolder(fid);
+  if (!folder) return;
+  const name = prompt('重命名项目文件夹', folder.name);
+  if (!name || !name.trim() || name.trim() === folder.name) return;
+
+  const res = await fetch(`/api/folders/${fid}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('重命名失败: ' + (data.error || '未知错误'));
+    return;
+  }
+  await loadFolders();
+  highlightFilters();
+  showToast('文件夹已重命名');
+}
+
+async function deleteFolder(fid) {
+  const folder = getFolder(fid);
+  if (!folder) return;
+  if (!confirm(`确定删除「${folder.name}」文件夹？\n截图文件会保留，只删除这个文件夹记录。`)) return;
+
+  const res = await fetch(`/api/folders/${fid}`, { method: 'DELETE' });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('删除失败: ' + (data.error || '未知错误'));
+    return;
+  }
+  if (state.currentFolderId === fid) state.currentFolderId = null;
+  await loadFolders();
+  highlightFilters();
+  renderGrid();
+  showToast('文件夹已删除，截图已保留');
+}
+
+async function addScreenshotsToFolder(fid, ids) {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (!uniqueIds.length) return;
+
+  const res = await fetch(`/api/folders/${fid}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ add_screenshots: uniqueIds }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('调入失败: ' + (data.error || '未知错误'));
+    return;
+  }
+  await loadFolders();
+  renderFolderFilters();
+  showToast(`已调入 ${uniqueIds.length} 张`);
 }
 
 document.querySelectorAll('#statusFilters .filter-item').forEach(item => {
   item.addEventListener('click', () => {
     state.filter.status = item.dataset.status;
     state.filter.app = null;
+    state.currentFolderId = null;
 
     highlightFilters();
     renderGrid();
@@ -355,14 +499,18 @@ document.querySelectorAll('#statusFilters .filter-item').forEach(item => {
 
 function highlightFilters() {
   document.querySelectorAll('#statusFilters .filter-item').forEach(el =>
-    el.classList.toggle('active', !state.filter.app && el.dataset.status === state.filter.status));
+    el.classList.toggle('active', !state.currentFolderId && !state.filter.app && el.dataset.status === state.filter.status));
   document.querySelectorAll('#appFilters .filter-item').forEach(el =>
-    el.classList.toggle('active', el.dataset.app === state.filter.app));
+    el.classList.toggle('active', !state.currentFolderId && el.dataset.app === state.filter.app));
+  document.querySelectorAll('#folderFilters .folder-filter').forEach(el =>
+    el.classList.toggle('active', el.dataset.folderId === state.currentFolderId));
 
   const parts = [];
-  if (state.filter.app) parts.push(state.filter.app);
+  const folder = state.currentFolderId ? getFolder(state.currentFolderId) : null;
+  if (folder) parts.push(folder.name);
+  else if (state.filter.app) parts.push(state.filter.app);
 
-  if (state.filter.status !== 'all') {
+  if (!folder && state.filter.status !== 'all') {
     const labels = { inbox: '待整理', organized: '已整理', favorites: '👍🏻 顶呱呱' };
     parts.push(labels[state.filter.status] || '');
   }
@@ -401,6 +549,11 @@ function renderGrid() {
   else if (state.filter.status === 'organized') items = items.filter(s => s.status === 'organized');
   else if (state.filter.status === 'favorites') items = items.filter(s => s.analysis?.favorite);
   if (state.filter.app) items = items.filter(s => s.app === state.filter.app);
+  if (state.currentFolderId) {
+    const folder = getFolder(state.currentFolderId);
+    const ids = new Set(folder?.screenshots || []);
+    items = items.filter(s => ids.has(s.id));
+  }
 
   if (!items.length) {
     if (state.searchQuery) {
@@ -436,12 +589,12 @@ function renderGrid() {
       g.items.map(s => {
         const isSelected = state.selected.has(s.id);
         const isInbox = s.status === 'inbox';
-        const canDrag = isInbox && !state.batchMode;
+        const canDrag = !state.batchMode || isSelected;
         return `
           <div class="card ${isSelected ? 'selected' : ''} ${state.batchMode ? 'selectable' : ''}"
                data-id="${s.id}" data-month="${g.key}"
                draggable="${canDrag ? 'true' : 'false'}"
-               ondragstart="${canDrag ? `dragStart(event, '${s.id}')` : ''}"
+               ondragstart="${canDrag ? `dragStart(event, this.dataset.id)` : ''}"
                oncontextmenu="showScreenshotContextMenu(event, this.dataset.id)"
                onclick="${state.batchMode ? `toggleCard('${s.id}', event)` : `openLightbox('${s.id}')`}">
             <div class="check">✓</div>
@@ -487,7 +640,9 @@ function dismissDragGuide() {
 // ── Drag & Drop Classify ────────────────────────────────
 
 function dragStart(event, id) {
+  const ids = state.selected.has(id) ? [...state.selected] : [id];
   event.dataTransfer.setData('text/plain', id);
+  event.dataTransfer.setData('application/json', JSON.stringify({ screenshotIds: ids }));
   event.dataTransfer.effectAllowed = 'move';
   const card = event.target.closest('.card');
   if (card) card.classList.add('dragging');
@@ -501,6 +656,18 @@ function dragStart(event, id) {
     event.dataTransfer.setDragImage(ghost, 50, 68);
     setTimeout(() => ghost.remove(), 0);
   }
+}
+
+function getDraggedScreenshotIds(event) {
+  try {
+    const payload = event.dataTransfer.getData('application/json');
+    if (payload) {
+      const parsed = JSON.parse(payload);
+      if (Array.isArray(parsed.screenshotIds)) return parsed.screenshotIds;
+    }
+  } catch (err) {}
+  const sid = event.dataTransfer.getData('text/plain');
+  return sid ? [sid] : [];
 }
 
 document.addEventListener('dragend', (e) => {
@@ -563,8 +730,51 @@ function toggleBatchMode() {
   document.getElementById('batchBar').style.display = state.batchMode ? 'flex' : 'none';
   document.getElementById('btnBatch').textContent = state.batchMode ? '取消' : '批量管理';
   document.getElementById('selectedCount').textContent = '0';
-  if (state.batchMode) renderBatchProjectBtns();
+  if (state.batchMode) {
+    renderBatchFolderBtns();
+    renderBatchProjectBtns();
+  }
   renderGrid();
+}
+
+function renderBatchFolderBtns() {
+  const el = document.getElementById('batchFolderBtns');
+  if (!el) return;
+  if (!state.folders.length) {
+    el.innerHTML = '<button class="btn btn-primary btn-sm" onclick="createFolder()">+ 新建文件夹</button>';
+    return;
+  }
+  const maxShow = 2;
+  let html = '';
+  state.folders.slice(0, maxShow).forEach(f => {
+    html += `<button class="btn btn-primary btn-sm" onclick="batchMoveToFolder('${f.id}')">调入${escapeHtml(f.name)}</button>`;
+  });
+  if (state.folders.length > maxShow) {
+    html += '<button class="btn btn-secondary btn-sm" onclick="batchMoveToFolderPrompt()">调入其他文件夹</button>';
+  }
+  el.innerHTML = html;
+}
+
+async function batchMoveToFolder(fid) {
+  if (!state.selected.size) return;
+  await addScreenshotsToFolder(fid, [...state.selected]);
+}
+
+async function batchMoveToFolderPrompt() {
+  if (!state.selected.size) return;
+  const names = state.folders.map((f, i) => `${i + 1}. ${f.name}`).join('\n');
+  const input = prompt(`输入文件夹序号或名称：\n${names}`);
+  if (!input) return;
+  const trimmed = input.trim();
+  const idx = Number(trimmed);
+  const folder = Number.isInteger(idx) && idx > 0
+    ? state.folders[idx - 1]
+    : state.folders.find(f => f.name === trimmed);
+  if (!folder) {
+    showToast('没有找到这个文件夹');
+    return;
+  }
+  await batchMoveToFolder(folder.id);
 }
 
 function renderBatchProjectBtns() {
@@ -616,12 +826,80 @@ async function batchImportToProject(pid) {
 
 function toggleCard(id, event) {
   event.stopPropagation();
+  if (state.suppressNextCardClick) {
+    state.suppressNextCardClick = false;
+    return;
+  }
   if (state.selected.has(id)) state.selected.delete(id);
   else state.selected.add(id);
   document.getElementById('selectedCount').textContent = state.selected.size;
   const card = document.querySelector(`.card[data-id="${id}"]`);
-  if (card) card.classList.toggle('selected');
+  if (card) {
+    const selected = state.selected.has(id);
+    card.classList.toggle('selected', selected);
+    if (state.batchMode) card.draggable = selected;
+  }
   updateMonthChecks();
+}
+
+function setupLassoSelection() {
+  const content = document.getElementById('content');
+  if (!content) return;
+
+  content.addEventListener('mousedown', (e) => {
+    if (!state.batchMode || e.button !== 0) return;
+    if (e.target.closest('button, input, textarea, select, a')) return;
+    if (e.target.closest('.card.selected')) return;
+
+    const box = document.createElement('div');
+    box.className = 'lasso-box';
+    document.body.appendChild(box);
+    state.lasso = {
+      startX: e.clientX,
+      startY: e.clientY,
+      box,
+      moved: false,
+    };
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!state.lasso) return;
+    const lasso = state.lasso;
+    const left = Math.min(lasso.startX, e.clientX);
+    const top = Math.min(lasso.startY, e.clientY);
+    const width = Math.abs(e.clientX - lasso.startX);
+    const height = Math.abs(e.clientY - lasso.startY);
+
+    if (width < 4 && height < 4) return;
+    lasso.moved = true;
+    lasso.box.style.left = `${left}px`;
+    lasso.box.style.top = `${top}px`;
+    lasso.box.style.width = `${width}px`;
+    lasso.box.style.height = `${height}px`;
+
+    const selectionRect = { left, top, right: left + width, bottom: top + height };
+    state.selected.clear();
+    document.querySelectorAll('#content .card.selectable').forEach(card => {
+      const rect = card.getBoundingClientRect();
+      const intersects = !(rect.right < selectionRect.left ||
+        rect.left > selectionRect.right ||
+        rect.bottom < selectionRect.top ||
+        rect.top > selectionRect.bottom);
+      card.classList.toggle('selected', intersects);
+      card.draggable = intersects;
+      if (intersects) state.selected.add(card.dataset.id);
+    });
+    document.getElementById('selectedCount').textContent = state.selected.size;
+    updateMonthChecks();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!state.lasso) return;
+    const moved = state.lasso.moved;
+    state.lasso.box.remove();
+    state.lasso = null;
+    if (moved) state.suppressNextCardClick = true;
+  });
 }
 
 function updateMonthChecks() {
@@ -640,10 +918,10 @@ function batchSelectAll() {
   const allSelected = allIds.every(id => state.selected.has(id));
   if (allSelected) {
     allIds.forEach(id => state.selected.delete(id));
-    cards.forEach(c => c.classList.remove('selected'));
+    cards.forEach(c => { c.classList.remove('selected'); c.draggable = false; });
   } else {
     allIds.forEach(id => { state.selected.add(id); });
-    cards.forEach(c => c.classList.add('selected'));
+    cards.forEach(c => { c.classList.add('selected'); c.draggable = true; });
   }
   document.getElementById('selectedCount').textContent = state.selected.size;
   updateMonthChecks();
@@ -655,10 +933,10 @@ function batchSelectMonth(monthKey) {
   const allSelected = monthIds.every(id => state.selected.has(id));
   if (allSelected) {
     monthIds.forEach(id => state.selected.delete(id));
-    cards.forEach(c => c.classList.remove('selected'));
+    cards.forEach(c => { c.classList.remove('selected'); c.draggable = false; });
   } else {
     monthIds.forEach(id => state.selected.add(id));
-    cards.forEach(c => c.classList.add('selected'));
+    cards.forEach(c => { c.classList.add('selected'); c.draggable = true; });
   }
   document.getElementById('selectedCount').textContent = state.selected.size;
   updateMonthChecks();
@@ -688,8 +966,7 @@ async function batchDelete() {
 // ── Context Menu: Delete Screenshot ─────────────────────
 
 function hideScreenshotContextMenu() {
-  const existing = document.querySelector('.screenshot-context-menu');
-  if (existing) existing.remove();
+  document.querySelectorAll('.screenshot-context-menu').forEach(el => el.remove());
 }
 
 function showScreenshotContextMenu(event, id) {
@@ -702,11 +979,15 @@ function showScreenshotContextMenu(event, id) {
   const menu = document.createElement('div');
   menu.className = 'screenshot-context-menu';
   menu.innerHTML = `
-    <button class="context-menu-item danger">
+    <button class="context-menu-item" data-action="copy">
+      <span>复制图片</span>
+    </button>
+    <button class="context-menu-item danger" data-action="delete">
       <span>删除截图</span>
     </button>
   `;
-  menu.querySelector('button').addEventListener('click', () => deleteSingleScreenshot(id));
+  menu.querySelector('[data-action="copy"]').addEventListener('click', () => copyScreenshot(id));
+  menu.querySelector('[data-action="delete"]').addEventListener('click', () => deleteSingleScreenshot(id));
   document.body.appendChild(menu);
 
   const rect = menu.getBoundingClientRect();
@@ -714,6 +995,62 @@ function showScreenshotContextMenu(event, id) {
   const top = Math.min(event.clientY, window.innerHeight - rect.height - 8);
   menu.style.left = `${Math.max(8, left)}px`;
   menu.style.top = `${Math.max(8, top)}px`;
+}
+
+function showFolderContextMenu(event, fid) {
+  event.preventDefault();
+  event.stopPropagation();
+  hideScreenshotContextMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'screenshot-context-menu';
+  menu.innerHTML = `
+    <button class="context-menu-item" data-action="rename">
+      <span>重命名文件夹</span>
+    </button>
+    <button class="context-menu-item danger" data-action="delete">
+      <span>删除文件夹</span>
+    </button>
+  `;
+  menu.querySelector('[data-action="rename"]').addEventListener('click', () => {
+    hideScreenshotContextMenu();
+    renameFolder(fid);
+  });
+  menu.querySelector('[data-action="delete"]').addEventListener('click', () => {
+    hideScreenshotContextMenu();
+    deleteFolder(fid);
+  });
+  document.body.appendChild(menu);
+
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(event.clientX, window.innerWidth - rect.width - 8);
+  const top = Math.min(event.clientY, window.innerHeight - rect.height - 8);
+  menu.style.left = `${Math.max(8, left)}px`;
+  menu.style.top = `${Math.max(8, top)}px`;
+}
+
+async function copyScreenshot(id) {
+  hideScreenshotContextMenu();
+  const item = state.screenshots.find(s => s.id === id);
+  if (!item) return;
+  const url = `${location.origin}/screenshots/${item.path}`;
+
+  try {
+    const res = await fetch(url);
+    const blob = await res.blob();
+    if (navigator.clipboard && window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+      showToast('图片已复制');
+      return;
+    }
+  } catch (err) {}
+
+  try {
+    await navigator.clipboard.writeText(url);
+    showToast('已复制图片地址');
+  } catch (err) {
+    showToast('复制失败，请在大图中手动复制');
+  }
 }
 
 async function deleteSingleScreenshot(id) {

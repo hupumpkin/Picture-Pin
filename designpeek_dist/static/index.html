@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
-<link rel="stylesheet" href="/static/style.css?v=51">
+<link rel="stylesheet" href="/static/style.css?v=52">
 </head>
 <body>
 <div class="app">
@@ -31,6 +31,14 @@
           <div class="filter-item" data-status="inbox" id="filterInbox" style="display:none;">待整理 <span class="count" id="countInbox">0</span></div>
           <div class="filter-item" data-status="favorites" style="margin-top:4px;">👍🏻 顶呱呱 <span class="count" id="countFavorites">0</span></div>
         </div>
+      </div>
+      <div class="sidebar-divider"></div>
+      <div>
+        <div class="section-title section-title-row">
+          <span>项目文件夹</span>
+          <button class="btn-icon-mini" onclick="createFolder()" title="新建文件夹">+</button>
+        </div>
+        <div class="filter-list" id="folderFilters"></div>
       </div>
       <div class="sidebar-divider"></div>
       <div>
@@ -126,6 +134,7 @@
     <div class="batch-bar" id="batchBar" style="display:none;">
       <span style="font-weight:500;">已选 <strong id="selectedCount">0</strong> 张</span>
       <button class="btn btn-secondary btn-sm" onclick="batchSelectAll()">全选</button>
+      <span id="batchFolderBtns" style="display:flex;gap:8px;"></span>
       <span id="batchProjectBtns" style="display:flex;gap:8px;"></span>
       <div style="flex:1;"></div>
       <button class="btn btn-danger btn-sm" onclick="batchDelete()">删除</button>
@@ -258,6 +267,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=95"></script>
+<script src="/static/app.js?v=96"></script>
 </body>
 </html>

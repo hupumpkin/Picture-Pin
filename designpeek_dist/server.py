@@ -100,6 +100,7 @@ def ocr_image(filepath: str) -> str:
         return ""
 
 app = FastAPI(title="DesignPeek")
+FOLDERS_FILE = os.path.join(DATA_DIR, "folders.json")
 
 
 # ── ensure directories ──────────────────────────────────────────────
@@ -112,6 +113,10 @@ if not os.path.exists(ANALYSIS_FILE):
 
 if not os.path.exists(PROJECTS_FILE):
     with open(PROJECTS_FILE, "w") as f:
+        json.dump({}, f)
+
+if not os.path.exists(FOLDERS_FILE):
+    with open(FOLDERS_FILE, "w") as f:
         json.dump({}, f)
 
 
@@ -132,6 +137,16 @@ def load_projects():
 
 def save_projects(data):
     with open(PROJECTS_FILE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_folders():
+    with open(FOLDERS_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_folders(data):
+    with open(FOLDERS_FILE, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -453,6 +468,18 @@ async def api_delete(req: Request):
     if projects_changed:
         save_projects(projects)
 
+    folders = load_folders()
+    folders_changed = False
+    deleted_set = set(deleted)
+    for folder in folders.values():
+        before = folder.get("screenshots", [])
+        after = [sid for sid in before if sid not in deleted_set]
+        if len(after) != len(before):
+            folder["screenshots"] = after
+            folders_changed = True
+    if folders_changed:
+        save_folders(folders)
+
     return {"ok": True, "deleted": deleted}
 
 
@@ -502,6 +529,75 @@ async def api_analyze(req: Request):
 
     save_analysis(analysis)
     return {"ok": True, "results": results, "analysis": analysis}
+
+
+# ── API: Custom folders ──────────────────────────────────────────────
+
+@app.get("/api/folders")
+async def api_list_folders():
+    """List custom screenshot folders. Folders store references only."""
+    folders = load_folders()
+    return list(folders.values())
+
+
+@app.post("/api/folders")
+async def api_create_folder(req: Request):
+    """Create a custom screenshot folder."""
+    body = await req.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "文件夹名称不能为空"}, status_code=400)
+
+    folders = load_folders()
+    fid = f"folder_{uuid.uuid4().hex[:8]}"
+    folders[fid] = {
+        "id": fid,
+        "name": name,
+        "screenshots": [],
+        "created_at": datetime.now().isoformat(),
+    }
+    save_folders(folders)
+    return {"ok": True, "folder": folders[fid]}
+
+
+@app.put("/api/folders/{fid}")
+async def api_update_folder(fid: str, req: Request):
+    """Rename a folder or add/remove screenshot references."""
+    folders = load_folders()
+    if fid not in folders:
+        return JSONResponse({"ok": False, "error": "文件夹不存在"}, status_code=404)
+
+    body = await req.json()
+    folder = folders[fid]
+
+    if "name" in body:
+        name = body.get("name", "").strip()
+        if not name:
+            return JSONResponse({"ok": False, "error": "文件夹名称不能为空"}, status_code=400)
+        folder["name"] = name
+
+    current = list(dict.fromkeys(folder.get("screenshots", [])))
+    if "add_screenshots" in body:
+        for sid in body.get("add_screenshots", []):
+            if sid and sid not in current:
+                current.append(sid)
+    if "remove_screenshots" in body:
+        remove = set(body.get("remove_screenshots", []))
+        current = [sid for sid in current if sid not in remove]
+
+    folder["screenshots"] = current
+    save_folders(folders)
+    return {"ok": True, "folder": folder}
+
+
+@app.delete("/api/folders/{fid}")
+async def api_delete_folder(fid: str):
+    """Delete a custom folder only. Screenshot files are preserved."""
+    folders = load_folders()
+    if fid in folders:
+        del folders[fid]
+        save_folders(folders)
+    return {"ok": True}
 
 
 # ── API: Projects ────────────────────────────────────────────────────
