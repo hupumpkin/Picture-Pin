@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>DesignPeek · 上传截图</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="upload-page">
+  <h1>DesignPeek</h1>
+  <p class="sub">截图上传</p>
+
+  <div class="drop-zone" id="dropZone">
+    <div class="icon">📤</div>
+    <p>点击选择或拖拽截图到这里</p>
+    <p class="hint">支持 PNG、JPG、HEIC，可多选</p>
+    <input type="file" id="fileInput" accept="image/*" multiple hidden>
+  </div>
+
+  <div class="progress-bar" id="progressBar" style="display:none;">
+    <div class="fill" id="progressFill" style="width:0%"></div>
+  </div>
+  <p id="statusText" style="margin-top:12px;font-size:13px;color:var(--text-muted);"></p>
+
+  <a href="/" style="margin-top:24px;color:var(--text-muted);text-decoration:none;font-size:13px;">← 返回主页</a>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const progressBar = document.getElementById('progressBar');
+const progressFill = document.getElementById('progressFill');
+const statusText = document.getElementById('statusText');
+
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => uploadFiles(e.target.files));
+
+dropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('dragover');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  uploadFiles(e.dataTransfer.files);
+});
+
+async function uploadFiles(files) {
+  if (!files.length) return;
+  progressBar.style.display = 'block';
+  statusText.textContent = `共 ${files.length} 张，开始上传...`;
+
+  let done = 0;
+  for (const file of files) {
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      await fetch('/api/upload', { method: 'POST', body: form });
+      done++;
+      progressFill.style.width = (done / files.length * 100) + '%';
+      statusText.textContent = `已上传 ${done}/${files.length}`;
+    } catch (err) {
+      statusText.textContent = `上传失败: ${file.name}`;
+    }
+  }
+  statusText.textContent = `完成！${files.length} 张截图已上传`;
+  setTimeout(() => { progressBar.style.display = 'none'; progressFill.style.width = '0%'; }, 2000);
+}
+</script>
+</body>
+</html>

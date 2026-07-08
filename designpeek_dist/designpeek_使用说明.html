@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DesignPeek / 设计透视 — 使用指南</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --surface: #fff;
+    --border: #e8e8e8;
+    --text: #1a1a1a;
+    --text-secondary: #666;
+    --text-muted: #999;
+    --accent: #1a1a1a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container { max-width: 720px; margin: 0 auto; padding: 60px 24px 80px; }
+
+  .hero { text-align: center; margin-bottom: 60px; }
+  .hero h1 { font-size: 36px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; }
+  .hero .sub { font-size: 18px; color: var(--text-muted); }
+  .hero .tagline { font-size: 15px; color: var(--text-secondary); margin-top: 16px; line-height: 1.8; max-width: 520px; margin-left: auto; margin-right: auto; }
+
+  .section { margin-bottom: 48px; }
+  .section h2 { font-size: 20px; font-weight: 600; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .section h3 { font-size: 16px; font-weight: 600; margin: 24px 0 8px; }
+
+  .feature-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+  .feature-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .feature-card .icon { font-size: 28px; margin-bottom: 8px; }
+  .feature-card .title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .feature-card .desc { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+
+  .step { display: flex; gap: 16px; margin-bottom: 20px; align-items: flex-start; }
+  .step-num { width: 32px; height: 32px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px; }
+  .step-content { flex: 1; }
+  .step-content .title { font-weight: 600; margin-bottom: 4px; }
+  .step-content .desc { font-size: 14px; color: var(--text-secondary); line-height: 1.6; }
+
+  code {
+    background: #f3f3f3;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: "SF Mono", Monaco, "Cascadia Code", monospace;
+    white-space: nowrap;
+  }
+
+  .note {
+    background: #fff8e1;
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-size: 13px;
+    color: #8d6e00;
+    line-height: 1.6;
+    margin-top: 16px;
+  }
+
+  .note strong { color: #5d4a00; }
+
+  .footer { text-align: center; color: var(--text-muted); font-size: 13px; margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="hero">
+    <h1>DesignPeek / 设计透视</h1>
+    <div class="sub">交互设计师的竞品截图书房</div>
+    <div class="tagline">
+      手机上随手截的竞品截图，敲两下自动飞到 Mac<br>
+      AI 帮你按触点分类、生成跨平台对比分析报告
+    </div>
+  </div>
+
+  <!-- 产品定位 -->
+  <div class="section">
+    <h2>产品定位</h2>
+    <p style="color:var(--text-secondary);line-height:1.8;">
+      DesignPeek 是一款专为交互设计师打造的<strong>竞品截图管理与分析工具</strong>。它解决了一个高频痛点：设计师每天在手机上截取大量竞品 App 截图，但截图散落在相册里难以整理，更难以系统性地对比分析。
+    </p>
+    <p style="color:var(--text-secondary);line-height:1.8;margin-top:12px;">
+      通过 <strong>iPhone 快捷指令 + Mac 本地服务 + AI 视觉分析</strong> 的组合，DesignPeek 实现了从截图收集到分析报告的完整闭环。所有数据存储在本地，无需上传云端。
+    </p>
+
+    <h3>核心能力</h3>
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="icon">📱</div>
+        <div class="title">一键收集</div>
+        <div class="desc">iPhone 控制中心一键上传截图，自动按 App 归类命名</div>
+      </div>
+      <div class="feature-card">
+        <div class="icon">📂</div>
+        <div class="title">项目管理</div>
+        <div class="desc">按设计主题创建项目，将相关截图批量归类，拖拽即可整理</div>
+      </div>
+      <div class="feature-card">
+        <div class="icon">🤖</div>
+        <div class="title">AI 分析</div>
+        <div class="desc">Gemini 2.5 Flash 自动识别触点类型，生成跨平台对比矩阵</div>
+      </div>
+      <div class="feature-card">
+        <div class="icon">🔒</div>
+        <div class="title">数据本地</div>
+        <div class="desc">截图和分析全存本地，不上传任何第三方服务器</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 快速上手 -->
+  <div class="section">
+    <h2>快速上手</h2>
+
+    <h3>Mac 端</h3>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <div class="title">首次安装</div>
+        <div class="desc">终端进入项目目录，运行 <code>./setup.sh</code> 安装依赖</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <div class="title">配置 API Key</div>
+        <div class="desc">编辑 <code>.env</code> 文件，填入 Gemini API Key（免费获取：<a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>）</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <div class="title">启动服务</div>
+        <div class="desc">运行 <code>./start.sh</code>，终端会显示局域网 IP 地址，记下来</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-content">
+        <div class="title">打开管理页面</div>
+        <div class="desc">浏览器访问 <code>http://localhost:8765</code></div>
+      </div>
+    </div>
+
+    <h3>iPhone 端</h3>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <div class="title">安装快捷指令</div>
+        <div class="desc">在 iPhone 浏览器打开：<br><code>https://www.icloud.com/shortcuts/e6e454840f5b4efe9285b8454447a309</code></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <div class="title">填入 Mac IP 地址</div>
+        <div class="desc">打开快捷指令编辑，找到「文本」步骤，把 IP 改成 Mac 启动时显示的地址（如 <code>192.168.1.10</code>）</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <div class="title">添加到控制中心</div>
+        <div class="desc">iPhone 设置 → 控制中心 → 添加此快捷指令，之后下滑即可一键上传</div>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>注意：</strong>Mac 和 iPhone 需要连接同一个 Wi-Fi 网络才能传输截图。AI 分析使用 Google Gemini API，免费额度每天约 1500 次。
+    </div>
+  </div>
+
+  <!-- 采集方式 -->
+  <div class="section">
+    <h2>四种采集方式</h2>
+    <p style="color:var(--text-secondary);line-height:1.8;">
+      除了 iPhone 一键上传，DesignPeek 还支持安卓直连、边逛边截、电脑本地上传等多种采集方式，按手头设备和场景灵活选择。
+    </p>
+    <div class="feature-grid" style="margin-top:20px;">
+      <div class="feature-card">
+        <div class="icon">🍎</div>
+        <div class="title">iPhone 一键上传</div>
+        <div class="desc">配置好快捷指令后，控制中心下滑一键发送截图到 Mac（见上方「快速上手 - iPhone 端」）</div>
+      </div>
+      <div class="feature-card">
+        <div class="icon">📸</div>
+        <div class="title">安卓截图</div>
+        <div class="desc">数据线连接安卓手机，点「安卓截图」抓取当前屏幕，自动识别 App 并归类命名</div>
+      </div>
+      <div class="feature-card">
+        <div class="icon">🎬</div>
+        <div class="title">边逛边截</div>
+        <div class="desc">安卓连接后开启，边刷 App 边自动截图，自动跳过重复页面；支持「定时」与「屏幕变化触发（免提）」两种模式</div>
+      </div>
+      <div class="feature-card">
+        <div class="icon">💻</div>
+        <div class="title">本地上传</div>
+        <div class="desc">在电脑上直接选择图片文件批量上传，适合整理已有的截图素材</div>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>注意：</strong>安卓相关功能（安卓截图 / 边逛边截）需用数据线连接安卓手机并开启 USB 调试，Mac 上需安装 <code>adb</code>（Android 调试桥）。iPhone 一键上传与本地上传无需 adb。
+    </div>
+  </div>
+
+  <!-- 使用场景 -->
+  <div class="section">
+    <h2>典型使用流程</h2>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-content">
+        <div class="title">收集截图</div>
+        <div class="desc">在手机上刷竞品 App，看到好的设计就截图，滑出控制中心点击快捷指令上传</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-content">
+        <div class="title">创建项目</div>
+        <div class="desc">在 Mac 管理页面创建分析项目（如「公益频道竞品分析」），批量导入相关截图</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-content">
+        <div class="title">AI 分析</div>
+        <div class="desc">点击分析项目，AI 自动识别每张截图的触点，确认调整后生成对比报告</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-content">
+        <div class="title">查看报告</div>
+        <div class="desc">获取平台对比、触点分析、设计亮点和综合建议，直接用于设计决策</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    DesignPeek / 设计透视 — 为交互设计师打造
+  </div>
+
+</div>
+</body>
+</html>
