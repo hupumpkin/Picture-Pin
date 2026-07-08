@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
-<link rel="stylesheet" href="/static/style.css?v=53">
+<link rel="stylesheet" href="/static/style.css?v=54">
 </head>
 <body>
 <div class="app">
@@ -134,7 +134,6 @@
     <div class="batch-bar" id="batchBar" style="display:none;">
       <span style="font-weight:500;">已选 <strong id="selectedCount">0</strong> 张</span>
       <button class="btn btn-secondary btn-sm" onclick="batchSelectAll()">全选</button>
-      <span id="batchFolderBtns" style="display:flex;gap:8px;"></span>
       <span id="batchProjectBtns" style="display:flex;gap:8px;"></span>
       <div style="flex:1;"></div>
       <button class="btn btn-danger btn-sm" onclick="batchDelete()">删除</button>
@@ -194,7 +193,7 @@
     <p style="color:var(--text-muted);font-size:12px;margin-bottom:12px;">选择已有分析项目</p>
     <div class="nav-list" id="importProjectList" style="max-height:200px;overflow-y:auto;margin-bottom:8px;"></div>
     <div class="modal-actions" style="justify-content:space-between;">
-      <span></span>
+      <button class="btn btn-secondary btn-sm" onclick="createProjectFromImport()">+ 新建分析项目</button>
       <div>
         <button class="btn btn-secondary btn-sm" onclick="hideImportProject()">取消</button>
         <button class="btn btn-primary btn-sm" id="btnImportConfirm" onclick="confirmImportProject()" disabled>加入</button>
@@ -267,6 +266,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=97"></script>
+<script src="/static/app.js?v=98"></script>
 </body>
 </html>

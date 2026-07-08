@@ -208,7 +208,6 @@ async function loadFolders() {
   const res = await fetch('/api/folders');
   state.folders = await res.json();
   renderFolderFilters();
-  if (state.batchMode) renderBatchFolderBtns();
 }
 
 function buildScreenshotSignature(items) {
@@ -730,69 +729,14 @@ function toggleBatchMode() {
   document.getElementById('batchBar').style.display = state.batchMode ? 'flex' : 'none';
   document.getElementById('btnBatch').textContent = state.batchMode ? '取消' : '批量管理';
   document.getElementById('selectedCount').textContent = '0';
-  if (state.batchMode) {
-    renderBatchFolderBtns();
-    renderBatchProjectBtns();
-  }
+  if (state.batchMode) renderBatchProjectBtns();
   renderGrid();
-}
-
-function renderBatchFolderBtns() {
-  const el = document.getElementById('batchFolderBtns');
-  if (!el) return;
-  if (!state.folders.length) {
-    el.innerHTML = '';
-    return;
-  }
-  const maxShow = 2;
-  let html = '';
-  state.folders.slice(0, maxShow).forEach(f => {
-    html += `<button class="btn btn-primary btn-sm" onclick="batchMoveToFolder('${f.id}')">移入${escapeHtml(f.name)}</button>`;
-  });
-  if (state.folders.length > maxShow) {
-    html += '<button class="btn btn-secondary btn-sm" onclick="batchMoveToFolderPrompt()">移入其他文件夹</button>';
-  }
-  el.innerHTML = html;
-}
-
-async function batchMoveToFolder(fid) {
-  if (!state.selected.size) return;
-  await addScreenshotsToFolder(fid, [...state.selected]);
-}
-
-async function batchMoveToFolderPrompt() {
-  if (!state.selected.size) return;
-  const names = state.folders.map((f, i) => `${i + 1}. ${f.name}`).join('\n');
-  const input = prompt(`输入素材文件夹序号或名称：\n${names}`);
-  if (!input) return;
-  const trimmed = input.trim();
-  const idx = Number(trimmed);
-  const folder = Number.isInteger(idx) && idx > 0
-    ? state.folders[idx - 1]
-    : state.folders.find(f => f.name === trimmed);
-  if (!folder) {
-    showToast('没有找到这个素材文件夹');
-    return;
-  }
-  await batchMoveToFolder(folder.id);
 }
 
 function renderBatchProjectBtns() {
   const el = document.getElementById('batchProjectBtns');
-  const projects = state.projects;
-  if (!projects.length) {
-    el.innerHTML = '<span class="batch-hint">暂无分析项目</span>';
-    return;
-  }
-  const maxShow = 2;
-  let html = '';
-  projects.slice(0, maxShow).forEach(p => {
-    html += `<button class="btn btn-secondary btn-sm" onclick="batchImportToProject('${p.id}')">加入${escapeHtml(p.name)}</button>`;
-  });
-  if (projects.length > maxShow) {
-    html += '<button class="btn btn-secondary btn-sm" onclick="batchImportProject()">加入其他分析项目</button>';
-  }
-  el.innerHTML = html;
+  if (!el) return;
+  el.innerHTML = '<button class="btn btn-secondary btn-sm" onclick="batchImportProject()">加入分析项目</button>';
 }
 
 async function _doImportToProject(pid) {
@@ -1089,19 +1033,45 @@ document.addEventListener('scroll', hideScreenshotContextMenu, true);
 function batchImportProject() {
   if (!state.selected.size) return;
   state.importTargetPid = null;
+  renderImportProjectList();
+  document.getElementById('btnImportConfirm').disabled = true;
+  document.getElementById('importProjectModal').style.display = 'flex';
+}
+
+function renderImportProjectList() {
   const el = document.getElementById('importProjectList');
   if (!state.projects.length) {
-    el.innerHTML = '<div class="nav-empty">暂无分析项目，请先到「分析」页创建</div>';
+    el.innerHTML = '<div class="nav-empty">暂无分析项目，可点击下方新建</div>';
   } else {
     el.innerHTML = state.projects.map(p => `
-      <div class="nav-item" onclick="selectImportTarget('${p.id}', this)">
+      <div class="nav-item ${state.importTargetPid === p.id ? 'active' : ''}" onclick="selectImportTarget('${p.id}', this)">
         <span class="nav-label">${escapeHtml(p.name)}</span>
         <span class="count">${Object.keys(p.screenshots || {}).length}</span>
       </div>
     `).join('');
   }
-  document.getElementById('btnImportConfirm').disabled = true;
-  document.getElementById('importProjectModal').style.display = 'flex';
+}
+
+async function createProjectFromImport() {
+  const name = prompt('新建分析项目名称');
+  if (!name || !name.trim()) return;
+
+  const res = await fetch('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), description: '' }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('创建分析项目失败: ' + (data.error || '未知错误'));
+    return;
+  }
+
+  await loadProjects();
+  state.importTargetPid = data.project.id;
+  renderImportProjectList();
+  document.getElementById('btnImportConfirm').disabled = false;
+  showToast('分析项目已创建');
 }
 
 function selectImportTarget(pid, el) {
