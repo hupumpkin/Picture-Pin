@@ -31,7 +31,8 @@ pip install -q -r requirements.txt
 echo "  ✓ 依赖已安装"
 
 # OCR module (macOS only, may fail on other OS)
-python3 -c "import Vision; print('  ✓ OCR 模块可用')" 2>/dev/null || echo "  ⚠ OCR 模块未安装（仅影响文字搜索，不影响分析功能）"
+python3 -c "import Vision" 2>/dev/null && echo "  ✓ OCR 模块可用" || \
+  (command -v swift >/dev/null && echo "  ✓ Mac 原生 OCR 可用" || echo "  ⚠ OCR 不可用（仅影响图片文字搜索）")
 
 # Ensure directories
 mkdir -p screenshots/新添加截图 data

@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -35,25 +36,44 @@ try:
     import Quartz
     import Vision
     import Foundation
-    _OCR_AVAILABLE = True
+    _PYOBJC_OCR_AVAILABLE = True
 except ImportError:
-    _OCR_AVAILABLE = False
+    _PYOBJC_OCR_AVAILABLE = False
 
 
 import threading
+
+OCR_SWIFT_SOURCE = os.path.join(os.path.dirname(__file__), "ocr.swift")
+OCR_BINARY = os.path.join(DATA_DIR, "designpeek_ocr")
+_OCR_BUILD_LOCK = threading.Lock()
+_ANALYSIS_WRITE_LOCK = threading.Lock()
+_OCR_AVAILABLE = _PYOBJC_OCR_AVAILABLE or bool(shutil.which("swiftc") or shutil.which("xcrun"))
+_OCR_INDEX_STATE = {"running": False, "processed": 0, "total": 0, "error": None}
+
+
+def _ensure_ocr_binary():
+    if _PYOBJC_OCR_AVAILABLE:
+        return None
+    with _OCR_BUILD_LOCK:
+        source_mtime = os.path.getmtime(OCR_SWIFT_SOURCE)
+        if os.path.exists(OCR_BINARY) and os.path.getmtime(OCR_BINARY) >= source_mtime:
+            return OCR_BINARY
+        result = subprocess.run(
+            ["xcrun", "swiftc", OCR_SWIFT_SOURCE, "-o", OCR_BINARY],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "无法编译本地文字识别程序")
+        return OCR_BINARY
 
 
 def _ocr_async(filepath: str):
     """Run OCR in background thread and save result."""
     text = ocr_image(filepath)
-    if not text:
-        return
     sid = os.path.splitext(os.path.basename(filepath))[0]
-    analysis = load_analysis()
-    entry = analysis.get(sid, {})
-    entry["ocr_text"] = text
-    analysis[sid] = entry
-    save_analysis(analysis)
+    _save_ocr_result(sid, text)
 
 
 def _schedule_ocr(filepath: str):
@@ -68,6 +88,18 @@ def ocr_image(filepath: str) -> str:
         return ""
 
     try:
+        if not _PYOBJC_OCR_AVAILABLE:
+            binary = _ensure_ocr_binary()
+            result = subprocess.run(
+                [binary, filepath],
+                capture_output=True,
+                text=True,
+                timeout=90,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.strip() or "文字识别失败")
+            return result.stdout.strip()
+
         with open(filepath, "rb") as f:
             img_data = f.read()
 
@@ -135,6 +167,16 @@ def load_analysis():
 def save_analysis(data):
     with open(ANALYSIS_FILE, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _save_ocr_result(sid, text):
+    with _ANALYSIS_WRITE_LOCK:
+        analysis = load_analysis()
+        entry = analysis.get(sid, {})
+        entry["ocr_text"] = text
+        entry["ocr_indexed_at"] = datetime.now().isoformat()
+        analysis[sid] = entry
+        save_analysis(analysis)
 
 
 def load_projects():
@@ -291,6 +333,39 @@ def migrate_to_material_folder_storage():
 
 
 migrate_to_material_folder_storage()
+
+
+def _backfill_ocr_index():
+    if _OCR_INDEX_STATE["running"] or not _OCR_AVAILABLE:
+        return
+    analysis = load_analysis()
+    pending = [
+        path for path in Path(SCREENSHOTS_DIR).rglob("*")
+        if path.is_file() and _is_image_file(path)
+        and not analysis.get(path.stem, {}).get("ocr_indexed_at")
+    ]
+    _OCR_INDEX_STATE.update(running=True, processed=0, total=len(pending), error=None)
+    try:
+        for index, path in enumerate(pending, 1):
+            _save_ocr_result(path.stem, ocr_image(str(path)))
+            _OCR_INDEX_STATE["processed"] = index
+            if index % 10 == 0:
+                print(f"  OCR 索引进度: {index}/{len(pending)}")
+    except Exception as exc:
+        _OCR_INDEX_STATE["error"] = str(exc)
+        print(f"  OCR 索引失败: {exc}")
+    finally:
+        _OCR_INDEX_STATE["running"] = False
+
+
+def start_ocr_backfill():
+    thread = threading.Thread(target=_backfill_ocr_index, daemon=True)
+    thread.start()
+
+
+@app.on_event("startup")
+async def startup_ocr_index():
+    start_ocr_backfill()
 
 
 def get_local_ip():
@@ -980,7 +1055,7 @@ async def api_ocr(req: Request):
         return JSONResponse({"ok": False, "error": "未选择截图"}, status_code=400)
 
     if not _OCR_AVAILABLE:
-        return JSONResponse({"ok": False, "error": "OCR 模块未安装，请运行: pip install pyobjc-framework-Vision"}, status_code=500)
+        return JSONResponse({"ok": False, "error": "本机文字识别组件不可用"}, status_code=500)
 
     analysis = load_analysis()
     results = {}
@@ -999,21 +1074,18 @@ async def api_ocr(req: Request):
             continue
 
         text = ocr_image(found)
-        entry = analysis.get(sid, {})
-        entry["ocr_text"] = text
-        analysis[sid] = entry
+        _save_ocr_result(sid, text)
         results[sid] = {"text": text}
 
-    save_analysis(analysis)
     return {"ok": True, "results": results}
 
 
 @app.get("/api/search")
 async def api_search(q: str = ""):
     """Search screenshots by OCR text, note, source App, or material folder."""
-    q = q.strip().lower()
+    q = re.sub(r"\s+", "", q).casefold()
     if not q:
-        return []
+        return {"ids": [], "indexing": _OCR_INDEX_STATE["running"]}
 
     analysis = load_analysis()
     metadata = load_screenshot_metadata()
@@ -1024,21 +1096,22 @@ async def api_search(q: str = ""):
     def match_screenshot(sid, app, folder_name):
         entry = analysis.get(sid, {})
 
-        # Search in OCR text
-        ocr = (entry.get("ocr_text") or "").lower()
-        if q in ocr:
+        def contains(value):
+            return q in re.sub(r"\s+", "", value or "").casefold()
+
+        if contains(entry.get("ocr_text")):
             return True
 
-        # Search in note
-        note = (entry.get("note") or "").lower()
-        if q in note:
+        if contains(entry.get("note")):
             return True
 
-        # Search in app name
-        if app and q in app.lower():
+        if contains(app):
             return True
 
-        if folder_name and q in folder_name.lower():
+        if contains(folder_name):
+            return True
+
+        if contains(sid):
             return True
 
         return False
@@ -1056,14 +1129,20 @@ async def api_search(q: str = ""):
             if match_screenshot(stem, app_name, folder_name):
                 results.append(stem)
 
-    return results
+    return {
+        "ids": results,
+        "indexing": _OCR_INDEX_STATE["running"],
+        "processed": _OCR_INDEX_STATE["processed"],
+        "total": _OCR_INDEX_STATE["total"],
+        "error": _OCR_INDEX_STATE["error"],
+    }
 
 
 @app.post("/api/ocr/all")
 async def api_ocr_all():
     """Run OCR on all screenshots that don't have OCR text yet."""
     if not _OCR_AVAILABLE:
-        return JSONResponse({"ok": False, "error": "OCR 模块未安装"}, status_code=500)
+        return JSONResponse({"ok": False, "error": "本机文字识别组件不可用"}, status_code=500)
 
     analysis = load_analysis()
     to_ocr = []
@@ -1074,20 +1153,17 @@ async def api_ocr_all():
             if os.path.splitext(f)[1].lower() in valid_ext:
                 sid = os.path.splitext(f)[0]
                 entry = analysis.get(sid, {})
-                if not entry.get("ocr_text"):
+                if not entry.get("ocr_indexed_at"):
                     to_ocr.append((sid, os.path.join(root, f)))
 
     processed = 0
     for sid, fpath in to_ocr:
         text = ocr_image(fpath)
-        entry = analysis.get(sid, {})
-        entry["ocr_text"] = text
-        analysis[sid] = entry
+        _save_ocr_result(sid, text)
         processed += 1
         if processed % 10 == 0:
             print(f"  OCR 进度: {processed}/{len(to_ocr)}")
 
-    save_analysis(analysis)
     return {"ok": True, "processed": processed, "total": len(to_ocr)}
 
 

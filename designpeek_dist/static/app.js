@@ -96,6 +96,8 @@ let state = {
   lightboxItems: [],
   searchQuery: '',
   searchResults: null,
+  searchIndexing: false,
+  searchProgress: null,
   manageMode: false,
   screenshotSignature: '',
   autoRefreshTimer: null,
@@ -582,25 +584,29 @@ function renderGrid() {
   const content = document.getElementById('content');
   let items = state.screenshots;
 
-  // Search filter (highest priority)
+  // Search is global and takes priority over sidebar filters.
   if (state.searchResults !== null) {
     const resultSet = new Set(state.searchResults);
     items = items.filter(s => resultSet.has(s.id));
-  }
-
-  if (state.filter.status === 'inbox') items = items.filter(s => s.status === 'inbox');
-  else if (state.filter.status === 'organized') items = items.filter(s => s.status === 'organized');
-  else if (state.filter.status === 'favorites') items = items.filter(s => s.analysis?.favorite);
-  if (state.filter.app) items = items.filter(s => s.app === state.filter.app);
-  if (state.currentFolderId) {
-    const folder = getFolder(state.currentFolderId);
-    const ids = new Set(folder?.screenshots || []);
-    items = items.filter(s => ids.has(s.id));
+  } else {
+    if (state.filter.status === 'inbox') items = items.filter(s => s.status === 'inbox');
+    else if (state.filter.status === 'organized') items = items.filter(s => s.status === 'organized');
+    else if (state.filter.status === 'favorites') items = items.filter(s => s.analysis?.favorite);
+    if (state.filter.app) items = items.filter(s => s.app === state.filter.app);
+    if (state.currentFolderId) {
+      const folder = getFolder(state.currentFolderId);
+      const ids = new Set(folder?.screenshots || []);
+      items = items.filter(s => ids.has(s.id));
+    }
   }
 
   if (!items.length) {
     if (state.searchQuery) {
-      content.innerHTML = `<div class="search-no-results"><div class="icon">🔍</div><p>未找到包含「${escapeHtml(state.searchQuery)}」的截图</p><p style="font-size:12px;color:var(--text-muted);">新截图上传后会自动识别文字，试试其他关键词</p></div>`;
+      const progress = state.searchProgress;
+      const message = state.searchIndexing
+        ? `正在识别图片文字${progress ? ` ${progress.processed}/${progress.total}` : ''}，结果会自动出现`
+        : `未找到包含「${escapeHtml(state.searchQuery)}」的截图`;
+      content.innerHTML = `<div class="search-no-results"><div class="icon">🔍</div><p>${message}</p><p style="font-size:12px;color:var(--text-muted);">可搜索图片文字、素材文件夹、来源 App、备注或文件名</p></div>`;
     } else {
       content.innerHTML = `<div class="empty"><div class="empty-icon">📱</div><p>没有匹配的截图</p></div>`;
     }
@@ -660,6 +666,7 @@ function renderGrid() {
 
 function shouldShowDragGuide() {
   if (state.batchMode) return false;
+  if (state.searchResults !== null) return false;
   if (state.filter.status !== 'inbox') return false;
   try {
     return !localStorage.getItem('dp_drag_guide_dismissed');
@@ -2333,6 +2340,10 @@ function getVisibleItems() {
     const ids = Object.keys(state.currentProject.screenshots || {});
     return ids.map(id => ssMap[id]).filter(Boolean);
   }
+  if (state.searchResults !== null) {
+    const ids = new Set(state.searchResults);
+    return items.filter(s => ids.has(s.id));
+  }
   if (state.filter.status === 'inbox') items = items.filter(s => s.status === 'inbox');
   else if (state.filter.status === 'organized') items = items.filter(s => s.status === 'organized');
   else if (state.filter.status === 'favorites') items = items.filter(s => s.analysis?.favorite);
@@ -2501,16 +2512,28 @@ async function onSearchInput() {
   if (!q) {
     state.searchQuery = '';
     state.searchResults = null;
+    state.searchIndexing = false;
+    state.searchProgress = null;
     renderGrid();
     return;
   }
 
   state.searchQuery = q;
-  searchTimer = setTimeout(async () => {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    state.searchResults = await res.json();
-    renderGrid();
-  }, 250);
+  searchTimer = setTimeout(() => runSearch(q), 250);
+}
+
+async function runSearch(q) {
+  const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+  const data = await res.json();
+  if (document.getElementById('searchInput').value.trim() !== q) return;
+  state.searchResults = Array.isArray(data) ? data : (data.ids || []);
+  state.searchIndexing = Boolean(data.indexing);
+  state.searchProgress = data.total ? { processed: data.processed || 0, total: data.total } : null;
+  renderGrid();
+  if (state.searchIndexing) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => runSearch(q), 1200);
+  }
 }
 
 function clearSearch() {
@@ -2518,6 +2541,8 @@ function clearSearch() {
   document.getElementById('searchClear').style.display = 'none';
   state.searchQuery = '';
   state.searchResults = null;
+  state.searchIndexing = false;
+  state.searchProgress = null;
   renderGrid();
 }
 
