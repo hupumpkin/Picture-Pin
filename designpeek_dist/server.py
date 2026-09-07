@@ -483,6 +483,38 @@ async def api_delete(req: Request):
     return {"ok": True, "deleted": deleted}
 
 
+@app.post("/api/reveal")
+async def api_reveal_screenshots(req: Request):
+    """Open Finder at the selected screenshot or its containing folders."""
+    body = await req.json()
+    ids = body.get("ids", [])
+    if not ids:
+        return JSONResponse({"ok": False, "error": "未选择截图"}, status_code=400)
+
+    found_paths = []
+    wanted = set(ids)
+    for root, _, files in os.walk(SCREENSHOTS_DIR):
+        for filename in files:
+            if os.path.splitext(filename)[0] in wanted:
+                found_paths.append(os.path.join(root, filename))
+
+    if not found_paths:
+        return JSONResponse({"ok": False, "error": "未找到截图文件"}, status_code=404)
+
+    try:
+        if len(found_paths) == 1:
+            subprocess.run(["open", "-R", found_paths[0]], check=True, timeout=10)
+            opened = 1
+        else:
+            folders = sorted({os.path.dirname(path) for path in found_paths})
+            for folder in folders:
+                subprocess.run(["open", folder], check=True, timeout=10)
+            opened = len(folders)
+        return {"ok": True, "opened": opened}
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return JSONResponse({"ok": False, "error": "无法打开访达"}, status_code=500)
+
+
 # ── API: AI Analyze ─────────────────────────────────────────────────
 
 @app.post("/api/analyze")

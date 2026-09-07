@@ -264,6 +264,33 @@ body {
   justify-content: space-between;
 }
 
+.section-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0 8px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.section-toggle-icon {
+  font-size: 16px;
+  line-height: 1;
+  transition: transform 0.15s ease;
+}
+
+.section-toggle.expanded .section-toggle-icon {
+  transform: rotate(90deg);
+}
+
+#appFilters[hidden] {
+  display: none;
+}
+
 .btn-icon-mini {
   width: 18px;
   height: 18px;
@@ -399,6 +426,12 @@ body {
   column-gap: 12px;
   row-gap: 24px;
   margin-bottom: 4px;
+}
+
+#viewScreenshots #content,
+#viewScreenshots #content * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* ── Drag guide card ───────────────────── */

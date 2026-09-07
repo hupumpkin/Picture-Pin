@@ -87,6 +87,8 @@ let state = {
   projects: [],
   folders: [],
   currentFolderId: null,
+  folderPickerId: null,
+  appFiltersExpanded: false,
   currentProject: null,
   projectFilter: 'all',
   modalSelected: new Set(),
@@ -229,6 +231,7 @@ function isInteractionBusy() {
     'createProjectModal',
     'addScreenshotsModal',
     'importProjectModal',
+    'folderPickerModal',
     'phoneGuideModal',
     'pathEditorModal',
   ];
@@ -358,6 +361,15 @@ function renderAppFilters() {
   });
 }
 
+function toggleAppFilters() {
+  state.appFiltersExpanded = !state.appFiltersExpanded;
+  const list = document.getElementById('appFilters');
+  const toggle = document.getElementById('appFiltersToggle');
+  list.hidden = !state.appFiltersExpanded;
+  toggle.setAttribute('aria-expanded', String(state.appFiltersExpanded));
+  toggle.classList.toggle('expanded', state.appFiltersExpanded);
+}
+
 function getFolder(fid) {
   return state.folders.find(f => f.id === fid);
 }
@@ -482,7 +494,44 @@ async function addScreenshotsToFolder(fid, ids) {
   }
   await loadFolders();
   renderFolderFilters();
-  showToast(`已移入文件夹 ${uniqueIds.length} 张`);
+  showToast(`已加入素材文件夹 ${uniqueIds.length} 张`);
+}
+
+function showFolderPicker() {
+  if (!state.selected.size) return;
+  state.folderPickerId = null;
+  const el = document.getElementById('folderPickerList');
+  if (!state.folders.length) {
+    el.innerHTML = '<div class="nav-empty">暂无素材文件夹，请先在左侧点击 + 新建</div>';
+  } else {
+    el.innerHTML = state.folders.map(folder => `
+      <div class="nav-item" data-folder-id="${folder.id}" onclick="selectFolderPicker('${folder.id}', this)">
+        <span class="nav-label">📁 ${escapeHtml(folder.name)}</span>
+        <span class="count">${(folder.screenshots || []).length}</span>
+      </div>
+    `).join('');
+  }
+  document.getElementById('btnFolderPickerConfirm').disabled = true;
+  document.getElementById('folderPickerModal').style.display = 'flex';
+}
+
+function selectFolderPicker(fid, el) {
+  state.folderPickerId = fid;
+  document.querySelectorAll('#folderPickerList .nav-item').forEach(item => item.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('btnFolderPickerConfirm').disabled = false;
+}
+
+function hideFolderPicker() {
+  document.getElementById('folderPickerModal').style.display = 'none';
+  state.folderPickerId = null;
+}
+
+async function confirmFolderPicker() {
+  if (!state.folderPickerId || !state.selected.size) return;
+  const fid = state.folderPickerId;
+  hideFolderPicker();
+  await addScreenshotsToFolder(fid, [...state.selected]);
 }
 
 document.querySelectorAll('#statusFilters .filter-item').forEach(item => {
@@ -794,6 +843,7 @@ function setupLassoSelection() {
     if (!state.batchMode || e.button !== 0) return;
     if (e.target.closest('button, input, textarea, select, a')) return;
     if (e.target.closest('.card.selected')) return;
+    e.preventDefault();
 
     const box = document.createElement('div');
     box.className = 'lasso-box';
@@ -916,22 +966,41 @@ function hideScreenshotContextMenu() {
 function showScreenshotContextMenu(event, id) {
   event.preventDefault();
   event.stopPropagation();
-  if (state.batchMode) return;
+
+  if (state.batchMode && !state.selected.has(id)) {
+    state.selected.clear();
+    state.selected.add(id);
+    document.querySelectorAll('#content .card.selectable').forEach(card => {
+      const selected = card.dataset.id === id;
+      card.classList.toggle('selected', selected);
+      card.draggable = selected;
+    });
+    document.getElementById('selectedCount').textContent = '1';
+    updateMonthChecks();
+  }
+
+  const ids = state.batchMode && state.selected.has(id) ? [...state.selected] : [id];
+  const isMultiple = ids.length > 1;
 
   hideScreenshotContextMenu();
 
   const menu = document.createElement('div');
   menu.className = 'screenshot-context-menu';
   menu.innerHTML = `
-    <button class="context-menu-item" data-action="copy">
+    ${isMultiple ? '' : `<button class="context-menu-item" data-action="copy">
       <span>复制图片</span>
+    </button>`}
+    <button class="context-menu-item" data-action="reveal">
+      <span>打开本地图片文件夹</span>
     </button>
     <button class="context-menu-item danger" data-action="delete">
-      <span>删除截图</span>
+      <span>${isMultiple ? `删除 ${ids.length} 张截图` : '删除截图'}</span>
     </button>
   `;
-  menu.querySelector('[data-action="copy"]').addEventListener('click', () => copyScreenshot(id));
-  menu.querySelector('[data-action="delete"]').addEventListener('click', () => deleteSingleScreenshot(id));
+  const copyButton = menu.querySelector('[data-action="copy"]');
+  if (copyButton) copyButton.addEventListener('click', () => copyScreenshot(id));
+  menu.querySelector('[data-action="reveal"]').addEventListener('click', () => openScreenshotFolders(ids));
+  menu.querySelector('[data-action="delete"]').addEventListener('click', () => deleteScreenshotsFromMenu(ids));
   document.body.appendChild(menu);
 
   const rect = menu.getBoundingClientRect();
@@ -939,6 +1008,42 @@ function showScreenshotContextMenu(event, id) {
   const top = Math.min(event.clientY, window.innerHeight - rect.height - 8);
   menu.style.left = `${Math.max(8, left)}px`;
   menu.style.top = `${Math.max(8, top)}px`;
+}
+
+async function openScreenshotFolders(ids) {
+  hideScreenshotContextMenu();
+  const res = await fetch('/api/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const data = await res.json();
+  if (data.ok) showToast(data.opened > 1 ? `已打开 ${data.opened} 个本地文件夹` : '已在访达中打开');
+  else showToast('打开失败: ' + (data.error || '未知错误'));
+}
+
+async function deleteScreenshotsFromMenu(ids) {
+  hideScreenshotContextMenu();
+  const count = ids.length;
+  if (!confirm(count > 1 ? `确定删除这 ${count} 张截图？此操作不可撤销。` : '确定删除这张截图？此操作不可撤销。')) return;
+
+  const res = await fetch('/api/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast('删除失败: ' + (data.error || '未知错误'));
+    return;
+  }
+
+  ids.forEach(sid => state.selected.delete(sid));
+  document.getElementById('selectedCount').textContent = state.selected.size;
+  await Promise.all([loadStats(), loadScreenshots(), loadProjects(), loadFolders()]);
+  renderAppFilters();
+  renderGrid();
+  showToast(`已删除 ${data.deleted.length} 张截图`);
 }
 
 function showFolderContextMenu(event, fid) {
@@ -1891,11 +1996,12 @@ function hidePhoneGuide() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (document.getElementById('lightbox').style.display === 'flex') closeLightbox();
-    else if (state.batchMode) toggleBatchMode();
     else if (document.getElementById('phoneGuideModal').style.display === 'flex') hidePhoneGuide();
     else if (document.getElementById('createProjectModal').style.display === 'flex') hideCreateProject();
     else if (document.getElementById('addScreenshotsModal').style.display === 'flex') hideAddScreenshots();
+    else if (document.getElementById('folderPickerModal').style.display === 'flex') hideFolderPicker();
     else if (document.getElementById('importProjectModal').style.display === 'flex') hideImportProject();
+    else if (state.batchMode) toggleBatchMode();
   }
   if (e.key === 'ArrowLeft' && document.getElementById('lightbox').style.display === 'flex') {
     e.preventDefault();
