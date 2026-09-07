@@ -18,7 +18,7 @@ if os.path.exists(env_path):
                 os.environ.setdefault(k.strip(), v.strip())
 
 SCREENSHOTS_DIR = os.path.join(BASE_DIR, "screenshots")
-INBOX_DIR = os.path.join(SCREENSHOTS_DIR, "_inbox")
+INBOX_DIR = os.path.join(SCREENSHOTS_DIR, "新添加截图")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 ANALYSIS_FILE = os.path.join(DATA_DIR, "analysis.json")
 PROJECTS_FILE = os.path.join(DATA_DIR, "projects.json")

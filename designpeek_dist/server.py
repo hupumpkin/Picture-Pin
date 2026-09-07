@@ -101,6 +101,9 @@ def ocr_image(filepath: str) -> str:
 
 app = FastAPI(title="DesignPeek")
 FOLDERS_FILE = os.path.join(DATA_DIR, "folders.json")
+SCREENSHOT_METADATA_FILE = os.path.join(DATA_DIR, "screenshot_metadata.json")
+STORAGE_LAYOUT_FILE = os.path.join(DATA_DIR, "storage_layout_v2.json")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif")
 
 
 # ── ensure directories ──────────────────────────────────────────────
@@ -117,6 +120,10 @@ if not os.path.exists(PROJECTS_FILE):
 
 if not os.path.exists(FOLDERS_FILE):
     with open(FOLDERS_FILE, "w") as f:
+        json.dump({}, f)
+
+if not os.path.exists(SCREENSHOT_METADATA_FILE):
+    with open(SCREENSHOT_METADATA_FILE, "w") as f:
         json.dump({}, f)
 
 
@@ -148,6 +155,142 @@ def load_folders():
 def save_folders(data):
     with open(FOLDERS_FILE, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_screenshot_metadata():
+    with open(SCREENSHOT_METADATA_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_screenshot_metadata(data):
+    with open(SCREENSHOT_METADATA_FILE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _is_image_file(path):
+    return os.path.splitext(str(path))[1].lower() in IMAGE_EXTENSIONS
+
+
+def _validate_folder_name(name):
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("文件夹名称不能为空")
+    if name in (".", "..", "新添加截图", "_inbox") or "/" in name or "\\" in name:
+        raise ValueError("文件夹名称不可用")
+    return name
+
+
+def _folder_path(folder):
+    return os.path.join(SCREENSHOTS_DIR, folder["name"])
+
+
+def _find_screenshot_path(sid):
+    for root, _, files in os.walk(SCREENSHOTS_DIR):
+        for filename in files:
+            if _is_image_file(filename) and os.path.splitext(filename)[0] == sid:
+                return os.path.join(root, filename)
+    return None
+
+
+def _move_screenshot(path, target_dir):
+    os.makedirs(target_dir, exist_ok=True)
+    target = os.path.join(target_dir, os.path.basename(path))
+    if os.path.abspath(path) == os.path.abspath(target):
+        return target
+    if os.path.exists(target):
+        raise FileExistsError(f"目标文件已存在: {os.path.basename(target)}")
+    os.replace(path, target)
+    return target
+
+
+def _remove_empty_screenshot_dirs():
+    preserved = {os.path.abspath(SCREENSHOTS_DIR), os.path.abspath(INBOX_DIR)}
+    preserved.update(os.path.abspath(_folder_path(folder)) for folder in load_folders().values())
+    for root, _, _ in os.walk(SCREENSHOTS_DIR, topdown=False):
+        if os.path.abspath(root) in preserved:
+            continue
+        try:
+            finder_metadata = os.path.join(root, ".DS_Store")
+            if os.path.exists(finder_metadata):
+                os.remove(finder_metadata)
+            if not os.listdir(root):
+                os.rmdir(root)
+        except FileNotFoundError:
+            pass
+
+
+def sync_material_folders():
+    """Make folder references match the real material-folder directories."""
+    folders = load_folders()
+    changed = False
+    for folder in folders.values():
+        path = _folder_path(folder)
+        os.makedirs(path, exist_ok=True)
+        screenshot_ids = sorted(
+            p.stem for p in Path(path).iterdir()
+            if p.is_file() and _is_image_file(p)
+        )
+        if folder.get("screenshots", []) != screenshot_ids:
+            folder["screenshots"] = screenshot_ids
+            changed = True
+    if changed:
+        save_folders(folders)
+    return folders
+
+
+def migrate_to_material_folder_storage():
+    """One-time migration from App directories to physical material folders."""
+    if os.path.exists(STORAGE_LAYOUT_FILE):
+        return
+
+    folders = load_folders()
+    metadata = load_screenshot_metadata()
+    ordered_folders = sorted(folders.values(), key=lambda f: f.get("created_at", ""))
+    owner_by_sid = {}
+    for folder in ordered_folders:
+        for sid in folder.get("screenshots", []):
+            if isinstance(sid, str) and "\n" not in sid:
+                owner_by_sid[sid] = folder["id"]
+
+    images = [
+        p for p in Path(SCREENSHOTS_DIR).rglob("*")
+        if p.is_file() and _is_image_file(p)
+    ]
+    planned_targets = set()
+    for path in images:
+        owner = folders.get(owner_by_sid.get(path.stem))
+        target_dir = Path(_folder_path(owner)) if owner else Path(INBOX_DIR)
+        target = target_dir / path.name
+        key = str(target.resolve())
+        if key in planned_targets or (target.exists() and target.resolve() != path.resolve()):
+            raise RuntimeError(f"迁移中发现同名文件: {path.name}")
+        planned_targets.add(key)
+
+    folder_names = {folder["name"] for folder in folders.values()}
+    for path in images:
+        parts = path.relative_to(SCREENSHOTS_DIR).parts
+        top_dir = parts[0] if len(parts) > 1 else ""
+        if top_dir not in folder_names and top_dir not in ("_inbox", "新添加截图"):
+            metadata.setdefault(path.stem, {})["app"] = top_dir
+
+        owner = folders.get(owner_by_sid.get(path.stem))
+        target_dir = _folder_path(owner) if owner else INBOX_DIR
+        _move_screenshot(str(path), target_dir)
+
+    valid_ids = {path.stem for path in images}
+    for folder in folders.values():
+        folder["screenshots"] = sorted(
+            sid for sid, fid in owner_by_sid.items()
+            if fid == folder["id"] and sid in valid_ids
+        )
+    save_folders(folders)
+    save_screenshot_metadata(metadata)
+    _remove_empty_screenshot_dirs()
+    with open(STORAGE_LAYOUT_FILE, "w") as f:
+        json.dump({"version": 2, "migrated_at": datetime.now().isoformat()}, f, ensure_ascii=False, indent=2)
+
+
+migrate_to_material_folder_storage()
 
 
 def get_local_ip():
@@ -232,6 +375,14 @@ def save_uploaded_image(content: bytes, target_path: str, filename: str = "", co
     return final_path
 
 
+def remember_source_app(path, app_name):
+    if not app_name or app_name == "安卓截图":
+        return
+    metadata = load_screenshot_metadata()
+    metadata.setdefault(Path(path).stem, {})["app"] = app_name
+    save_screenshot_metadata(metadata)
+
+
 # ── API: Upload (auto from iPhone shortcut & manual from web) ────────
 
 @app.post("/api/upload")
@@ -293,15 +444,14 @@ async def api_upload_image(req: Request):
     if app_name:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"{app_name}_{ts}.png"
-        dest_dir = os.path.join(SCREENSHOTS_DIR, app_name)
-        os.makedirs(dest_dir, exist_ok=True)
-        path = os.path.join(dest_dir, name)
+        path = os.path.join(INBOX_DIR, name)
     else:
         name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}.png"
         path = os.path.join(INBOX_DIR, name)
 
     path = save_uploaded_image(content, path, name, req.headers.get("content-type", ""))
     name = os.path.basename(path)
+    remember_source_app(path, app_name)
 
     print(f"  ✓ 收到截图: {name}  ({len(content) / 1024:.0f} KB)")
     _schedule_ocr(path)
@@ -337,40 +487,26 @@ async def api_list(limit: int = 200):
     """List all screenshots with their metadata."""
     results = []
     analysis = load_analysis()
+    metadata = load_screenshot_metadata()
+    folders = sync_material_folders()
+    folder_by_name = {folder["name"]: folder for folder in folders.values()}
 
-    # Inbox screenshots
-    for f in sorted(Path(INBOX_DIR).iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".heic"):
-            rel = os.path.relpath(f, SCREENSHOTS_DIR)
-            results.append({
-                "id": f.stem,
-                "path": rel,
-                "status": "inbox",
-                "app": None,
-                "page_type": None,
-                "analysis": analysis.get(f.stem),
-                "mtime": f.stat().st_mtime,
-            })
-
-    # Organized screenshots
-    for root, dirs, files in os.walk(SCREENSHOTS_DIR):
-        if "_inbox" in root:
-            continue
+    for root, _, files in os.walk(SCREENSHOTS_DIR):
         for fname in sorted(files):
-            if os.path.splitext(fname)[1].lower() not in (".png", ".jpg", ".jpeg", ".webp", ".heic"):
+            if not _is_image_file(fname):
                 continue
             fpath = os.path.join(root, fname)
             rel = os.path.relpath(fpath, SCREENSHOTS_DIR)
             parts = rel.split(os.sep)
-            app_name = parts[0] if len(parts) >= 2 else None
-            page_type = parts[1] if len(parts) >= 3 else None
+            folder = folder_by_name.get(parts[0]) if len(parts) >= 2 else None
             stem = os.path.splitext(fname)[0]
             results.append({
                 "id": stem,
                 "path": rel,
-                "status": "organized",
-                "app": app_name,
-                "page_type": page_type,
+                "status": "organized" if folder else "inbox",
+                "folder_id": folder["id"] if folder else None,
+                "app": metadata.get(stem, {}).get("app"),
+                "page_type": None,
                 "analysis": analysis.get(stem),
                 "mtime": os.path.getmtime(fpath),
             })
@@ -383,42 +519,21 @@ async def api_list(limit: int = 200):
 
 @app.post("/api/classify")
 async def api_classify(req: Request):
-    """Move screenshots from inbox to organized folders."""
+    """Update source-App metadata without changing physical storage."""
     body = await req.json()
     ids = body.get("ids", [])
     app_name = body.get("app", "").strip()
-    page_type = body.get("page_type", "").strip()
 
-    if not ids or not app_name or not page_type:
+    if not ids or not app_name:
         return JSONResponse({"ok": False, "error": "缺少参数"}, status_code=400)
-
-    moved = []
+    metadata = load_screenshot_metadata()
+    updated = []
     for sid in ids:
-        for f in Path(INBOX_DIR).iterdir():
-            if f.stem == sid:
-                # Extract capture date from EXIF
-                date_str = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
-                try:
-                    img = Image.open(f)
-                    exif = img._getexif()
-                    if exif:
-                        for tag, value in exif.items():
-                            if tag == 36867:  # DateTimeOriginal
-                                date_str = value.replace(":", "").replace(" ", "_")
-                                break
-                except Exception:
-                    pass
-
-                ext = f.suffix
-                new_name = f"{app_name}_{page_type}_{date_str}{ext}"
-                dest_dir = os.path.join(SCREENSHOTS_DIR, app_name, page_type)
-                os.makedirs(dest_dir, exist_ok=True)
-                dest = os.path.join(dest_dir, new_name)
-                os.rename(str(f), dest)
-                moved.append({"id": sid, "name": new_name})
-                break
-
-    return {"ok": True, "moved": moved}
+        if _find_screenshot_path(sid):
+            metadata.setdefault(sid, {})["app"] = app_name
+            updated.append(sid)
+    save_screenshot_metadata(metadata)
+    return {"ok": True, "updated": updated}
 
 
 # ── API: Delete screenshots ─────────────────────────────────────────
@@ -436,7 +551,7 @@ async def api_delete(req: Request):
     for sid in ids:
         for root, _, files in os.walk(SCREENSHOTS_DIR):
             for f in files:
-                if os.path.splitext(f)[0] == sid:
+                if _is_image_file(f) and os.path.splitext(f)[0] == sid:
                     os.remove(os.path.join(root, f))
                     deleted.append(sid)
                     break
@@ -444,17 +559,18 @@ async def api_delete(req: Request):
                 continue
             break
 
-    # Clean up empty dirs
-    for root, dirs, files in os.walk(SCREENSHOTS_DIR, topdown=False):
-        if root != SCREENSHOTS_DIR and root != INBOX_DIR:
-            if not os.listdir(root):
-                os.rmdir(root)
+    _remove_empty_screenshot_dirs()
 
     # Also remove from analysis
     analysis = load_analysis()
     for sid in deleted:
         analysis.pop(sid, None)
     save_analysis(analysis)
+
+    metadata = load_screenshot_metadata()
+    for sid in deleted:
+        metadata.pop(sid, None)
+    save_screenshot_metadata(metadata)
 
     # Also remove deleted screenshots from projects to avoid stale empty cards.
     projects = load_projects()
@@ -567,20 +683,23 @@ async def api_analyze(req: Request):
 
 @app.get("/api/folders")
 async def api_list_folders():
-    """List custom screenshot folders. Folders store references only."""
-    folders = load_folders()
+    """List material folders backed by real directories."""
+    folders = sync_material_folders()
     return list(folders.values())
 
 
 @app.post("/api/folders")
 async def api_create_folder(req: Request):
-    """Create a custom screenshot folder."""
+    """Create a material folder and its real directory."""
     body = await req.json()
-    name = body.get("name", "").strip()
-    if not name:
-        return JSONResponse({"ok": False, "error": "文件夹名称不能为空"}, status_code=400)
+    try:
+        name = _validate_folder_name(body.get("name", ""))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
     folders = load_folders()
+    if any(folder["name"] == name for folder in folders.values()) or os.path.exists(os.path.join(SCREENSHOTS_DIR, name)):
+        return JSONResponse({"ok": False, "error": "同名素材文件夹已存在"}, status_code=409)
     fid = f"folder_{uuid.uuid4().hex[:8]}"
     folders[fid] = {
         "id": fid,
@@ -588,14 +707,15 @@ async def api_create_folder(req: Request):
         "screenshots": [],
         "created_at": datetime.now().isoformat(),
     }
+    os.makedirs(_folder_path(folders[fid]), exist_ok=False)
     save_folders(folders)
     return {"ok": True, "folder": folders[fid]}
 
 
 @app.put("/api/folders/{fid}")
 async def api_update_folder(fid: str, req: Request):
-    """Rename a folder or add/remove screenshot references."""
-    folders = load_folders()
+    """Rename a material folder or physically move screenshots into/out of it."""
+    folders = sync_material_folders()
     if fid not in folders:
         return JSONResponse({"ok": False, "error": "文件夹不存在"}, status_code=404)
 
@@ -603,32 +723,69 @@ async def api_update_folder(fid: str, req: Request):
     folder = folders[fid]
 
     if "name" in body:
-        name = body.get("name", "").strip()
-        if not name:
-            return JSONResponse({"ok": False, "error": "文件夹名称不能为空"}, status_code=400)
-        folder["name"] = name
+        try:
+            name = _validate_folder_name(body.get("name", ""))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        if name != folder["name"]:
+            if any(item["name"] == name for key, item in folders.items() if key != fid):
+                return JSONResponse({"ok": False, "error": "同名素材文件夹已存在"}, status_code=409)
+            old_path = _folder_path(folder)
+            new_path = os.path.join(SCREENSHOTS_DIR, name)
+            if os.path.exists(new_path):
+                return JSONResponse({"ok": False, "error": "同名目录已存在"}, status_code=409)
+            os.rename(old_path, new_path)
+            folder["name"] = name
 
     current = list(dict.fromkeys(folder.get("screenshots", [])))
     if "add_screenshots" in body:
-        for sid in body.get("add_screenshots", []):
-            if sid and sid not in current:
+        ids = list(dict.fromkeys(sid for sid in body.get("add_screenshots", []) if sid))
+        paths = {sid: _find_screenshot_path(sid) for sid in ids}
+        missing = [sid for sid, path in paths.items() if not path]
+        if missing:
+            return JSONResponse({"ok": False, "error": f"有 {len(missing)} 张截图未找到"}, status_code=404)
+        target_dir = _folder_path(folder)
+        for sid, path in paths.items():
+            target = os.path.join(target_dir, os.path.basename(path))
+            if os.path.abspath(path) != os.path.abspath(target) and os.path.exists(target):
+                return JSONResponse({"ok": False, "error": f"目标中已有同名图片: {os.path.basename(path)}"}, status_code=409)
+        for other in folders.values():
+            other["screenshots"] = [sid for sid in other.get("screenshots", []) if sid not in ids]
+        for sid, path in paths.items():
+            _move_screenshot(path, target_dir)
+            if sid not in current:
                 current.append(sid)
     if "remove_screenshots" in body:
         remove = set(body.get("remove_screenshots", []))
+        for sid in remove:
+            path = _find_screenshot_path(sid)
+            if path and os.path.dirname(path) == _folder_path(folder):
+                _move_screenshot(path, INBOX_DIR)
         current = [sid for sid in current if sid not in remove]
 
     folder["screenshots"] = current
     save_folders(folders)
+    _remove_empty_screenshot_dirs()
     return {"ok": True, "folder": folder}
 
 
 @app.delete("/api/folders/{fid}")
 async def api_delete_folder(fid: str):
-    """Delete a custom folder only. Screenshot files are preserved."""
-    folders = load_folders()
+    """Delete a material folder and return its screenshots to New Screenshots."""
+    folders = sync_material_folders()
     if fid in folders:
+        folder = folders[fid]
+        source_dir = _folder_path(folder)
+        paths = [p for p in Path(source_dir).iterdir() if p.is_file() and _is_image_file(p)]
+        for path in paths:
+            target = os.path.join(INBOX_DIR, path.name)
+            if os.path.exists(target):
+                return JSONResponse({"ok": False, "error": f"新添加截图中已有同名图片: {path.name}"}, status_code=409)
+        for path in paths:
+            _move_screenshot(str(path), INBOX_DIR)
         del folders[fid]
         save_folders(folders)
+        _remove_empty_screenshot_dirs()
     return {"ok": True}
 
 
@@ -853,16 +1010,18 @@ async def api_ocr(req: Request):
 
 @app.get("/api/search")
 async def api_search(q: str = ""):
-    """Search screenshots by OCR text, note, or app name."""
+    """Search screenshots by OCR text, note, source App, or material folder."""
     q = q.strip().lower()
     if not q:
         return []
 
     analysis = load_analysis()
+    metadata = load_screenshot_metadata()
+    folders = sync_material_folders()
+    folder_by_name = {folder["name"]: folder for folder in folders.values()}
     results = []
-    valid_ext = (".png", ".jpg", ".jpeg", ".webp", ".heic")
 
-    def match_screenshot(sid, path_rel, status, app, page_type, mtime):
+    def match_screenshot(sid, app, folder_name):
         entry = analysis.get(sid, {})
 
         # Search in OCR text
@@ -879,32 +1038,22 @@ async def api_search(q: str = ""):
         if app and q in app.lower():
             return True
 
-        # Search in page_type
-        if page_type and q in page_type.lower():
+        if folder_name and q in folder_name.lower():
             return True
 
         return False
 
-    # Inbox
-    for f in sorted(Path(INBOX_DIR).iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if f.suffix.lower() in valid_ext:
-            if match_screenshot(f.stem, os.path.relpath(f, SCREENSHOTS_DIR), "inbox", None, None, f.stat().st_mtime):
-                results.append(f.stem)
-
-    # Organized
-    for root, dirs, files in os.walk(SCREENSHOTS_DIR):
-        if "_inbox" in root:
-            continue
+    for root, _, files in os.walk(SCREENSHOTS_DIR):
         for fname in sorted(files):
-            if os.path.splitext(fname)[1].lower() not in valid_ext:
+            if not _is_image_file(fname):
                 continue
             fpath = os.path.join(root, fname)
             rel = os.path.relpath(fpath, SCREENSHOTS_DIR)
             parts = rel.split(os.sep)
-            app_name = parts[0] if len(parts) >= 2 else None
-            page_type = parts[1] if len(parts) >= 3 else None
             stem = os.path.splitext(fname)[0]
-            if match_screenshot(stem, rel, "organized", app_name, page_type, os.path.getmtime(fpath)):
+            folder_name = parts[0] if len(parts) >= 2 and parts[0] in folder_by_name else None
+            app_name = metadata.get(stem, {}).get("app")
+            if match_screenshot(stem, app_name, folder_name):
                 results.append(stem)
 
     return results
@@ -946,37 +1095,18 @@ async def api_ocr_all():
 
 @app.get("/api/stats")
 async def api_stats():
-    """Get overview stats: apps and counts."""
+    """Get overview stats without coupling source Apps to disk folders."""
     apps = {}
-    valid_ext = (".png", ".jpg", ".jpeg", ".webp", ".heic")
+    metadata = load_screenshot_metadata()
+    all_images = [p for p in Path(SCREENSHOTS_DIR).rglob("*") if p.is_file() and _is_image_file(p)]
+    for path in all_images:
+        app_name = metadata.get(path.stem, {}).get("app")
+        if app_name:
+            bucket = apps.setdefault(app_name, {})
+            bucket["_total"] = bucket.get("_total", 0) + 1
 
-    for root, dirs, files in os.walk(SCREENSHOTS_DIR):
-        if "_inbox" in root:
-            continue
-        parts = os.path.relpath(root, SCREENSHOTS_DIR).split(os.sep)
-        if len(parts) == 1 and parts[0] != ".":
-            # Top-level app dir: screenshots/{app}/
-            count = len([f for f in files if os.path.splitext(f)[1].lower() in valid_ext])
-            if count:
-                apps.setdefault(parts[0], {})["_total"] = count
-        elif len(parts) >= 2:
-            # Subdir: screenshots/{app}/{page_type}/
-            app_name = parts[0]
-            page_type = parts[1]
-            count = len([f for f in files if os.path.splitext(f)[1].lower() in valid_ext])
-            if count:
-                apps.setdefault(app_name, {})[page_type] = count
-
-    inbox_count = len([
-        f for f in os.listdir(INBOX_DIR)
-        if os.path.splitext(f)[1].lower() in valid_ext
-    ])
-
-    # Count organized and analyzed
-    organized_count = sum(
-        apps[a].get("_total", 0) + sum(v for k, v in apps[a].items() if k != "_total")
-        for a in apps
-    )
+    inbox_count = len([p for p in Path(INBOX_DIR).iterdir() if p.is_file() and _is_image_file(p)])
+    organized_count = len(all_images) - inbox_count
     analysis = load_analysis()
     analyzed_count = len([k for k, v in analysis.items() if v and not v.get("error")])
 
@@ -1082,15 +1212,13 @@ async def api_capture_android(req: Request = None):
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     if app_name and app_name != "安卓截图":
         name = f"{app_name}_{ts}.png"
-        dest_dir = os.path.join(SCREENSHOTS_DIR, app_name)
-        os.makedirs(dest_dir, exist_ok=True)
-        path = os.path.join(dest_dir, name)
     else:
         name = f"{ts}.png"
-        path = os.path.join(INBOX_DIR, name)
+    path = os.path.join(INBOX_DIR, name)
 
     with open(path, "wb") as f:
         f.write(data)
+    remember_source_app(path, app_name)
 
     print(f"  📱 安卓截图: {name}")
     _schedule_ocr(path)
@@ -1190,11 +1318,10 @@ async def api_run_path(pid: str):
                     app_name = adb_current_app()
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     name = f"{app_name}_{ts}.png" if app_name and app_name != "安卓截图" else f"{ts}.png"
-                    dest_dir = os.path.join(SCREENSHOTS_DIR, app_name) if app_name and app_name != "安卓截图" else INBOX_DIR
-                    os.makedirs(dest_dir, exist_ok=True)
-                    filepath = os.path.join(dest_dir, name)
+                    filepath = os.path.join(INBOX_DIR, name)
                     with open(filepath, "wb") as f:
                         f.write(data)
+                    remember_source_app(filepath, app_name)
                     _schedule_ocr(filepath)
                     results.append({"step": i, "filename": name, "app": app_name})
                     print(f"  📸 {name}")
@@ -1296,11 +1423,10 @@ def _cont_capture_loop(interval=2.5):
                     app_name = adb_current_app()
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     name = f"{app_name}_{ts}.png"
-                    dest_dir = os.path.join(SCREENSHOTS_DIR, app_name) if app_name and app_name != "安卓截图" else INBOX_DIR
-                    os.makedirs(dest_dir, exist_ok=True)
-                    filepath = os.path.join(dest_dir, name)
+                    filepath = os.path.join(INBOX_DIR, name)
                     with open(filepath, "wb") as f:
                         f.write(data)
+                    remember_source_app(filepath, app_name)
                     _schedule_ocr(filepath)
                     _cont_capture_count += 1
                     print(f"  📸 [{_cont_capture_count}] {name}")

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
-<link rel="stylesheet" href="/static/style.css?v=55">
+<link rel="stylesheet" href="/static/style.css?v=56">
 </head>
 <body>
 <div class="app">
@@ -27,9 +27,7 @@
     <div class="tab-sidebar-content active" id="tabSidebarScreenshots">
       <div>
         <div class="filter-list" id="statusFilters">
-          <div class="filter-item active" data-status="all">全部截图 <span class="count" id="countAll">0</span></div>
-          <div class="filter-item" data-status="inbox" id="filterInbox" style="display:none;">待整理 <span class="count" id="countInbox">0</span></div>
-          <div class="filter-item" data-status="favorites" style="margin-top:4px;">👍🏻 顶呱呱 <span class="count" id="countFavorites">0</span></div>
+          <div class="filter-item active" data-status="inbox" id="filterInbox">新添加截图 <span class="count" id="countInbox">0</span></div>
         </div>
       </div>
       <div class="sidebar-divider"></div>
@@ -125,7 +123,7 @@
   <!-- Screenshots view -->
   <div class="main-view active" id="viewScreenshots">
     <div class="toolbar" id="toolbar">
-      <span style="font-weight:500;" id="viewTitle">全部截图</span>
+      <span style="font-weight:500;" id="viewTitle">新添加截图</span>
       <div class="search-box" id="searchBox">
         <input type="text" id="searchInput" placeholder="搜索截图文字、备注..." oninput="onSearchInput()" onkeydown="if(event.key==='Escape'){this.value='';onSearchInput();this.blur();}">
         <button class="search-clear" id="searchClear" onclick="clearSearch()" style="display:none;">✕</button>
@@ -283,6 +281,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=99"></script>
+<script src="/static/app.js?v=100"></script>
 </body>
 </html>

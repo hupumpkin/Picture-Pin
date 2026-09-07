@@ -34,7 +34,7 @@ echo "  ✓ 依赖已安装"
 python3 -c "import Vision; print('  ✓ OCR 模块可用')" 2>/dev/null || echo "  ⚠ OCR 模块未安装（仅影响文字搜索，不影响分析功能）"
 
 # Ensure directories
-mkdir -p screenshots/_inbox data
+mkdir -p screenshots/新添加截图 data
 echo "  ✓ 目录已就绪"
 
 echo ""

@@ -78,7 +78,7 @@ function appIcon(name) {
 
 let state = {
   screenshots: [],
-  filter: { status: 'all', app: null },
+  filter: { status: 'inbox', app: null },
   selected: new Set(),
   batchMode: false,
   importTargetPid: null,
@@ -184,11 +184,6 @@ async function loadStats() {
 function applyStatsToSidebar() {
   if (!state.stats) return;
   document.getElementById('countInbox').textContent = state.stats.inbox_count || 0;
-  document.getElementById('countAll').textContent =
-    (state.stats.inbox_count || 0) + (state.stats.organized_count || 0);
-  // Show/hide inbox filter
-  document.getElementById('filterInbox').style.display =
-    (state.stats.inbox_count || 0) > 0 ? '' : 'none';
 }
 
 async function loadScreenshots() {
@@ -252,13 +247,15 @@ function startRealtimeRefresh() {
 async function autoRefreshScreenshots() {
   if (document.hidden || isInteractionBusy()) return;
   try {
-    const [statsRes, screenshotsRes] = await Promise.all([
+    const [statsRes, screenshotsRes, foldersRes] = await Promise.all([
       fetch('/api/stats'),
       fetch('/api/screenshots?limit=500'),
+      fetch('/api/folders'),
     ]);
-    const [stats, screenshots] = await Promise.all([
+    const [stats, screenshots, folders] = await Promise.all([
       statsRes.json(),
       screenshotsRes.json(),
+      foldersRes.json(),
     ]);
     const nextSignature = buildScreenshotSignature(screenshots);
     if (nextSignature === state.screenshotSignature) return;
@@ -268,10 +265,12 @@ async function autoRefreshScreenshots() {
 
     state.stats = stats;
     state.screenshots = screenshots;
+    state.folders = folders;
     state.screenshotSignature = nextSignature;
     applyStatsToSidebar();
     updateFavoritesCount();
     renderAppFilters();
+    renderFolderFilters();
 
     if (state.currentTab === 'screenshots') {
       renderGrid();
@@ -341,22 +340,13 @@ function renderAppFilters() {
 
   el.querySelectorAll('.filter-item').forEach(item => {
     item.addEventListener('click', () => {
-      state.filter.app = state.filter.app === item.dataset.app ? null : item.dataset.app;
-      state.filter.status = 'all';
+      const isClearing = state.filter.app === item.dataset.app;
+      state.filter.app = isClearing ? null : item.dataset.app;
+      state.filter.status = isClearing ? 'inbox' : 'all';
       state.currentFolderId = null;
       state.tagFilter = null;
       highlightFilters();
       renderGrid();
-    });
-    item.addEventListener('dragover', (e) => { e.preventDefault(); item.classList.add('drop-target'); });
-    item.addEventListener('dragleave', () => { item.classList.remove('drop-target'); });
-    item.addEventListener('drop', (e) => {
-      e.preventDefault();
-      item.classList.remove('drop-target');
-      const ids = getDraggedScreenshotIds(e);
-      const sid = ids[0];
-      const ss = state.screenshots.find(s => s.id === sid);
-      if (sid && ids.length === 1 && ss?.status === 'inbox') quickClassify(sid, item.dataset.app);
     });
   });
 }
@@ -394,8 +384,9 @@ function renderFolderFilters() {
   el.querySelectorAll('.folder-filter').forEach(item => {
     const fid = item.dataset.folderId;
     item.addEventListener('click', () => {
-      state.currentFolderId = state.currentFolderId === fid ? null : fid;
-      state.filter.status = 'all';
+      const isClearing = state.currentFolderId === fid;
+      state.currentFolderId = isClearing ? null : fid;
+      state.filter.status = isClearing ? 'inbox' : 'all';
       state.filter.app = null;
       highlightFilters();
       renderGrid();
@@ -455,15 +446,16 @@ async function renameFolder(fid) {
     showToast('重命名失败: ' + (data.error || '未知错误'));
     return;
   }
-  await loadFolders();
+  await Promise.all([loadFolders(), loadScreenshots(), loadStats()]);
   highlightFilters();
+  renderGrid();
   showToast('素材文件夹已重命名');
 }
 
 async function deleteFolder(fid) {
   const folder = getFolder(fid);
   if (!folder) return;
-  if (!confirm(`确定删除「${folder.name}」素材文件夹？\n截图文件会保留，只删除这个文件夹记录。`)) return;
+  if (!confirm(`确定删除「${folder.name}」素材文件夹？\n其中的截图会移回“新添加截图”，图片不会被删除。`)) return;
 
   const res = await fetch(`/api/folders/${fid}`, { method: 'DELETE' });
   const data = await res.json();
@@ -472,10 +464,11 @@ async function deleteFolder(fid) {
     return;
   }
   if (state.currentFolderId === fid) state.currentFolderId = null;
-  await loadFolders();
+  state.filter.status = 'inbox';
+  await Promise.all([loadFolders(), loadScreenshots(), loadStats()]);
   highlightFilters();
   renderGrid();
-  showToast('素材文件夹已删除，截图已保留');
+  showToast('素材文件夹已删除，截图已移回新添加截图');
 }
 
 async function addScreenshotsToFolder(fid, ids) {
@@ -492,8 +485,10 @@ async function addScreenshotsToFolder(fid, ids) {
     showToast('移入文件夹失败: ' + (data.error || '未知错误'));
     return;
   }
-  await loadFolders();
+  await Promise.all([loadFolders(), loadScreenshots(), loadStats()]);
   renderFolderFilters();
+  renderAppFilters();
+  renderGrid();
   showToast(`已加入素材文件夹 ${uniqueIds.length} 张`);
 }
 
@@ -559,10 +554,10 @@ function highlightFilters() {
   else if (state.filter.app) parts.push(state.filter.app);
 
   if (!folder && state.filter.status !== 'all') {
-    const labels = { inbox: '待整理', organized: '已整理', favorites: '👍🏻 顶呱呱' };
+    const labels = { inbox: '新添加截图', organized: '已整理' };
     parts.push(labels[state.filter.status] || '');
   }
-  document.getElementById('viewTitle').textContent = parts.length ? parts.join(' · ') : '全部截图';
+  document.getElementById('viewTitle').textContent = parts.length ? parts.join(' · ') : '截图';
 }
 
 // ── Date grouping ────────────────────────────────────────
@@ -674,7 +669,7 @@ function shouldShowDragGuide() {
 function renderDragGuideCard() {
   return `<div class="drag-guide-card">
     <div class="drag-guide-icon">👆</div>
-    <div class="drag-guide-text">拖拽截图到左侧<br>App 名称即可归类</div>
+    <div class="drag-guide-text">拖拽截图到左侧<br>素材文件夹即可归档</div>
     <button class="btn btn-secondary btn-sm" onclick="dismissDragGuide()">知道了</button>
   </div>`;
 }
@@ -722,8 +717,6 @@ document.addEventListener('dragend', (e) => {
   document.querySelectorAll('.card.dragging').forEach(c => c.classList.remove('dragging'));
 });
 
-// ── Quick Classify ───────────────────────────────────────
-
 function getSsMap() {
   const m = {};
   state.screenshots.forEach(s => { m[s.id] = s; });
@@ -747,27 +740,6 @@ function getSortedApps() {
   const top = pinned.filter(a => sorted.includes(a));
   const rest = sorted.filter(a => !pinned.includes(a));
   return [...top, ...rest];
-}
-
-async function quickClassify(id, app) {
-  // Optimistic removal
-  const card = document.querySelector(`.card[data-id="${id}"]`);
-  if (card) card.style.display = 'none';
-
-  const res = await fetch('/api/classify', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ids: [id], app, page_type: '其他' }),
-  });
-  if ((await res.json()).ok) {
-    dismissDragGuide();
-    await Promise.all([loadStats(), loadScreenshots()]);
-    renderAppFilters();
-    renderGrid();
-  } else {
-    if (card) card.style.display = '';
-    showToast('归类失败');
-  }
 }
 
 // ── Batch Mode ───────────────────────────────────────────
@@ -2365,6 +2337,11 @@ function getVisibleItems() {
   else if (state.filter.status === 'organized') items = items.filter(s => s.status === 'organized');
   else if (state.filter.status === 'favorites') items = items.filter(s => s.analysis?.favorite);
   if (state.filter.app) items = items.filter(s => s.app === state.filter.app);
+  if (state.currentFolderId) {
+    const folder = getFolder(state.currentFolderId);
+    const ids = new Set(folder?.screenshots || []);
+    items = items.filter(s => ids.has(s.id));
+  }
   return items;
 }
 
@@ -2494,7 +2471,8 @@ async function saveLightboxNote() {
 
 function updateFavoritesCount() {
   const count = state.screenshots.filter(s => s.analysis?.favorite).length;
-  document.getElementById('countFavorites').textContent = count;
+  const el = document.getElementById('countFavorites');
+  if (el) el.textContent = count;
 }
 
 function lightboxPrev() {
