@@ -170,6 +170,59 @@ def analyze_screenshot_evidence(image_path, screenshot_id, app_name, question, d
     return _parse_response(_vision_request(image_path, prompt, settings=settings))
 
 
+def observe_screenshot(image_path, screenshot_id, app_name, ocr_text="", settings=None):
+    """Extract reusable, question-independent visual facts from one screenshot."""
+    prompt = f"""
+你是严谨的资深产品设计研究员。请只观察这张静态截图中明确可见的内容，供后续多个问题复用。
+截图 ID：{screenshot_id}
+来源 App：{app_name or '未归类'}
+本机 OCR：{ocr_text[:5000] or '无'}
+
+不得推断点击率、转化率、流量、用户偏好或截图外的操作结果。scene_label 要用人能读懂的页面/场景名称，不能写截图 ID。
+严格返回 JSON：
+{{"screenshot_id":"{screenshot_id}","app":"{app_name or '未归类'}","scene_label":"简短场景名",
+"page_role":"页面或模块作用","visible_summary":"一句话客观概括",
+"visible_elements":["可见元素"],"information_hierarchy":["信息层级事实"],
+"actions_and_feedback":["可见入口、按钮、状态或反馈"],"trust_and_decision_cues":["可见决策或信任线索"],
+"continuity_cues":["可见的跨页面连续线索"]}}
+"""
+    return _parse_response(_vision_request(image_path, prompt, settings=settings, max_tokens=2048))
+
+
+def synthesize_quick_brief(question, angle, observations, ordered=False, settings=None):
+    """Create a compact decision brief from reusable screenshot observations."""
+    apps = sorted({item.get("app") or "未归类" for item in observations})
+    analysis_kind = "对比" if len(apps) > 1 else "竞品诊断"
+    prompt = f"""
+你是资深产品设计负责人。请把截图客观观察整理成一份用于快速迭代决策的「{analysis_kind}」速览。
+用户问题：{question}
+用户选择角度：{angle or '未指定，由你自动选择'}
+是否按用户确认顺序还原路径：{'是' if ordered else '否'}
+截图观察（顺序即用户顺序，仅 ordered=是时可视为路径）：{json.dumps(observations, ensure_ascii=False)}
+
+规则：
+1. 自动选择最多 3 个最能回答问题的成熟设计观察角度，不展示方法论堆砌。
+2. 首屏只给 1 句结论、最多 3 条核心发现、1-3 条高/中优先级行动和证据缺口。
+3. 每条发现严格拆为「竞品观察」「对我的启示」「建议行动」，并附真实截图 ID；证据标签使用 observation 的 scene_label。
+4. 静态截图不能证明点击率、转化率、流量、真实操作结果或用户心理。推测必须放在「待验证」。
+5. 单 App 标题与 kind 必须是「竞品诊断」；多 App 才能使用「对比」。
+6. 详细逐图证据、扩展观察角度、方法说明和验证指标放入 details。
+
+严格返回 JSON：
+{{"kind":"{analysis_kind}","conclusion":"一句话结论","perspectives":["最多3个角度"],
+"findings":[{{"title":"发现标题","observation":"竞品观察","implication":"对我的启示","action":"建议行动",
+"evidence":[{{"screenshot_id":"真实ID","scene_label":"可读场景名"}}],"confidence":"high/medium/low","to_validate":"待验证内容"}}],
+"priority_actions":[{{"priority":"high/medium","action":"行动","reason":"原因"}}],
+"evidence_gaps":[{{"gap":"证据缺口","suggested_screenshot":"建议补充的截图"}}],
+"details":{{"per_image":[{{"screenshot_id":"真实ID","scene_label":"场景名","observation":"客观观察"}}],
+"expanded_dimensions":[{{"name":"角度","insight":"扩展洞察"}}],"methodology":"简短方法说明",
+"validation_metrics":[{{"hypothesis":"待验证假设","metric":"建议指标"}}]}}}}
+"""
+    result = _parse_response(_text_request(prompt, settings=settings, max_tokens=4096))
+    result["kind"] = analysis_kind
+    return result
+
+
 def synthesize_project(project_name, question, context, framework, facts, settings=None):
     prompt = f"""
 你是资深竞品 UX 研究员。只基于下面的逐张截图证据生成对比看板和辅助报告。

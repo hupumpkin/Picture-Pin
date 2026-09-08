@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
-  <link rel="stylesheet" href="/static/style.css?v=74">
+  <link rel="stylesheet" href="/static/style.css?v=90">
 </head>
 <body>
 <div class="app">
@@ -52,18 +52,15 @@
     <!-- Level 2: Project list -->
     <div class="tab-sidebar-content" id="tabSidebarProjects" style="gap:8px;">
       <div class="filter-list" id="projectStatusFilters">
-        <div class="filter-item all-projects-nav active" data-filter="all">全部项目 <span class="count" id="countAllProjects">0</span></div>
-        <div class="filter-item" data-filter="pending">待分析 <span class="count" id="countPending">0</span></div>
-        <div class="filter-item" data-filter="analyzed">已分析 <span class="count" id="countAnalyzedProjects">0</span></div>
+        <div class="filter-item all-projects-nav active" data-filter="all">最近分析 <span class="count" id="countAllProjects">0</span></div>
       </div>
       <div class="sidebar-divider"></div>
       <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0;">
-        <span>项目列表</span>
+        <span>项目</span><button class="btn-icon-mini" onclick="showCreateProject()" title="新建项目">+</button>
       </div>
       <div class="nav-list" id="projectNavList"></div>
       <div style="margin-top: auto;">
         <button class="btn btn-secondary" onclick="showAISettings()" style="width:100%;justify-content:center;font-size:12px;margin-bottom:6px;">AI 设置</button>
-        <button class="btn btn-secondary" onclick="showCreateProject()" style="width:100%;justify-content:center;font-size:12px;">+ 创建分析项目</button>
       </div>
     </div>
   </div>
@@ -150,10 +147,13 @@
   <div class="main-view" id="viewProject">
     <div class="toolbar" id="projectToolbar">
       <span style="font-weight:500;flex:1;" id="projectViewTitle"></span>
-      <button class="btn btn-secondary btn-sm" id="btnAddScreenshots" onclick="showAddScreenshots()">+ 添加截图</button>
+      <button class="btn btn-secondary btn-sm" id="btnShareConversation" onclick="shareConversation()">复制链接</button>
+      <button class="btn btn-secondary btn-sm" id="btnRenameConversation" onclick="renameConversation()">重命名</button>
+      <button class="btn btn-danger btn-sm" id="btnDeleteConversation" onclick="deleteConversation()">删除</button>
+      <button class="btn btn-secondary btn-sm" id="btnAddScreenshots" onclick="showAddScreenshots()" style="display:none;">+ 添加截图</button>
       <button class="btn btn-secondary btn-sm" id="btnManageScreenshots" onclick="toggleManageScreenshots()" style="display:none;">管理截图</button>
-      <button class="btn btn-primary btn-sm" id="btnAnalyzeProject" onclick="focusAnalysisBrief()">准备分析</button>
-      <button class="btn btn-danger btn-sm" id="btnDeleteProject" onclick="deleteProject()">删除</button>
+      <button class="btn btn-primary btn-sm" id="btnAnalyzeProject" onclick="focusAnalysisBrief()" style="display:none;">准备分析</button>
+      <button class="btn btn-danger btn-sm" id="btnDeleteProject" onclick="deleteProject()" style="display:none;">删除</button>
     </div>
     <div class="content" id="projectContent"></div>
   </div>
@@ -165,11 +165,11 @@
 <!-- Create Project Modal -->
 <div class="modal-overlay" id="createProjectModal" style="display:none;">
   <div class="modal">
-    <h3>新建分析项目</h3>
-    <label>分析项目名称</label>
-    <input type="text" id="projectNameInput" placeholder="例如：公益频道竞品分析">
+    <h3>新建项目</h3>
+    <label>项目名称</label>
+    <input type="text" id="projectNameInput" placeholder="例如：新品频道研究">
     <label>描述（可选）</label>
-    <textarea id="projectDescInput" rows="2" placeholder="简要描述这个设计研究主题"></textarea>
+    <textarea id="projectDescInput" rows="2" placeholder="用于整理相关分析对话"></textarea>
     <div class="modal-actions">
       <button class="btn btn-secondary btn-sm" onclick="hideCreateProject()">取消</button>
       <button class="btn btn-primary btn-sm" onclick="createProject()">创建</button>
@@ -308,6 +308,6 @@
   </div>
 </div>
 
-  <script src="/static/app.js?v=123"></script>
+  <script src="/static/app.js?v=140"></script>
 </body>
 </html>

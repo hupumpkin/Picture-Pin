@@ -11,6 +11,7 @@ import socket
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -34,8 +35,10 @@ from analyzer import (
     _require_key,
     analyze_screenshot,
     analyze_screenshot_evidence,
+    observe_screenshot,
     suggest_dimensions,
     synthesize_project,
+    synthesize_quick_brief,
     test_ai_connection,
 )
 
@@ -56,6 +59,7 @@ OCR_BINARY = os.path.join(DATA_DIR, "designpeek_ocr")
 _OCR_BUILD_LOCK = threading.Lock()
 _ANALYSIS_WRITE_LOCK = threading.Lock()
 _PROJECTS_WRITE_LOCK = threading.Lock()
+_CONVERSATIONS_WRITE_LOCK = threading.Lock()
 _OCR_AVAILABLE = _PYOBJC_OCR_AVAILABLE or bool(shutil.which("swiftc") or shutil.which("xcrun"))
 _OCR_INDEX_STATE = {"running": False, "processed": 0, "total": 0, "error": None}
 
@@ -145,6 +149,8 @@ FOLDERS_FILE = os.path.join(DATA_DIR, "folders.json")
 SCREENSHOT_METADATA_FILE = os.path.join(DATA_DIR, "screenshot_metadata.json")
 STORAGE_LAYOUT_FILE = os.path.join(DATA_DIR, "storage_layout_v2.json")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif")
+CONVERSATIONS_FILE = os.path.join(DATA_DIR, "conversations.json")
+OBSERVATIONS_FILE = os.path.join(DATA_DIR, "screenshot_observations.json")
 
 
 # ── ensure directories ──────────────────────────────────────────────
@@ -166,6 +172,11 @@ if not os.path.exists(FOLDERS_FILE):
 if not os.path.exists(SCREENSHOT_METADATA_FILE):
     with open(SCREENSHOT_METADATA_FILE, "w") as f:
         json.dump({}, f)
+
+for local_file in (CONVERSATIONS_FILE, OBSERVATIONS_FILE):
+    if not os.path.exists(local_file):
+        with open(local_file, "w") as f:
+            json.dump({}, f)
 
 
 def load_analysis():
@@ -207,6 +218,60 @@ def update_project_record(pid, updater):
         updater(projects[pid])
         save_projects(projects)
         return projects[pid]
+
+
+def _load_json_object(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _save_json_object(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_conversations():
+    return _load_json_object(CONVERSATIONS_FILE)
+
+
+def save_conversations(data):
+    _save_json_object(CONVERSATIONS_FILE, data)
+
+
+def update_conversation_record(cid, updater):
+    with _CONVERSATIONS_WRITE_LOCK:
+        conversations = load_conversations()
+        if cid not in conversations:
+            return None
+        updater(conversations[cid])
+        save_conversations(conversations)
+        return conversations[cid]
+
+
+def _legacy_conversations():
+    """Expose old analysis projects without modifying their saved data."""
+    legacy = {}
+    for pid, project in load_projects().items():
+        ids = list(project.get("screenshots", {}))
+        if not ids:
+            continue
+        cid = f"legacy_{pid}"
+        brief = project.get("analysis_brief") or {}
+        legacy[cid] = {
+            "id": cid, "title": project.get("name") or "旧分析", "screenshot_ids": ids,
+            "project_id": pid, "question": brief.get("question", ""),
+            "angle": "", "mode": "quick", "screenshot_order": ids,
+            "status": project.get("analysis_status") or {"state": "draft"},
+            "result": project.get("analysis"), "created_at": project.get("created_at"),
+            "updated_at": project.get("created_at"), "legacy": True,
+        }
+    return legacy
+
+
+def all_conversations():
+    merged = _legacy_conversations()
+    merged.update(load_conversations())
+    return merged
 
 
 def load_folders():
@@ -347,6 +412,7 @@ def migrate_to_material_folder_storage():
         )
     save_folders(folders)
     save_screenshot_metadata(metadata)
+    deleted_set = set(deleted)
     _remove_empty_screenshot_dirs()
     with open(STORAGE_LAYOUT_FILE, "w") as f:
         json.dump({"version": 2, "migrated_at": datetime.now().isoformat()}, f, ensure_ascii=False, indent=2)
@@ -679,9 +745,32 @@ async def api_delete(req: Request):
     if projects_changed:
         save_projects(projects)
 
+    conversations = load_conversations()
+    conversations_changed = False
+    for conversation in conversations.values():
+        before = conversation.get("screenshot_ids", [])
+        after = [sid for sid in before if sid not in deleted_set]
+        if len(after) != len(before):
+            conversation["screenshot_ids"] = after
+            conversation["screenshot_order"] = [sid for sid in conversation.get("screenshot_order", [])
+                                                if sid not in deleted_set]
+            if conversation.get("result"):
+                conversation["status"] = {"state": "stale", "processed": 0,
+                                          "total": len(after),
+                                          "updated_at": datetime.now().isoformat()}
+            conversation["updated_at"] = datetime.now().isoformat()
+            conversations_changed = True
+    if conversations_changed:
+        save_conversations(conversations)
+
+    observations = _load_json_object(OBSERVATIONS_FILE)
+    if any(sid in observations for sid in deleted):
+        for sid in deleted:
+            observations.pop(sid, None)
+        _save_json_object(OBSERVATIONS_FILE, observations)
+
     folders = load_folders()
     folders_changed = False
-    deleted_set = set(deleted)
     for folder in folders.values():
         before = folder.get("screenshots", [])
         after = [sid for sid in before if sid not in deleted_set]
@@ -918,7 +1007,16 @@ async def api_test_ai_settings():
 async def api_list_projects():
     """List all projects."""
     projects = load_projects()
-    return list(projects.values())
+    conversations = all_conversations()
+    result = []
+    for project in projects.values():
+        item = dict(project)
+        item["conversation_count"] = sum(
+            1 for conversation in conversations.values()
+            if conversation.get("project_id") == project.get("id")
+        )
+        result.append(item)
+    return result
 
 
 @app.post("/api/projects")
@@ -937,6 +1035,7 @@ async def api_create_project(req: Request):
         "id": pid,
         "name": name,
         "description": description,
+        "parent_id": body.get("parent_id"),
         "screenshots": {},
         "analysis": None,
         "analysis_brief": None,
@@ -963,6 +1062,16 @@ async def api_update_project(pid: str, req: Request):
         proj["name"] = body["name"].strip()
     if "description" in body:
         proj["description"] = body["description"].strip()
+    if "parent_id" in body:
+        parent_id = body.get("parent_id")
+        if parent_id == pid or parent_id and parent_id not in projects:
+            return JSONResponse({"ok": False, "error": "上级项目不存在"}, status_code=400)
+        ancestor = parent_id
+        while ancestor:
+            if ancestor == pid:
+                return JSONResponse({"ok": False, "error": "不能移动到自己的下级项目"}, status_code=400)
+            ancestor = projects.get(ancestor, {}).get("parent_id")
+        proj["parent_id"] = parent_id
     if "add_screenshots" in body:
         screenshots_changed = True
         for item in body["add_screenshots"]:
@@ -999,7 +1108,19 @@ async def api_delete_project(pid: str):
         return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=404)
 
     del projects[pid]
+    for project in projects.values():
+        if project.get("parent_id") == pid:
+            project["parent_id"] = None
     save_projects(projects)
+    conversations = load_conversations()
+    changed = False
+    for conversation in conversations.values():
+        if conversation.get("project_id") == pid:
+            conversation["project_id"] = None
+            conversation["updated_at"] = datetime.now().isoformat()
+            changed = True
+    if changed:
+        save_conversations(conversations)
     return {"ok": True}
 
 
@@ -1197,6 +1318,246 @@ async def api_project_analysis_status(pid: str):
         return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=404)
     return {"ok": True, "status": project.get("analysis_status", {"state": "draft"}),
             "has_analysis": bool(project.get("analysis"))}
+
+
+# ── API: Analysis conversations ─────────────────────────────────────
+
+def _observation_signature(path, settings):
+    raw = json.dumps({"mtime": os.path.getmtime(path), "provider": settings["provider"],
+                      "model": settings["model"], "schema": 1}, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _sanitize_quick_result(result, observations):
+    labels = {item["screenshot_id"]: item.get("scene_label") or "截图证据"
+              for item in observations}
+    for finding in result.get("findings", [])[:3]:
+        evidence = []
+        for item in finding.get("evidence", []):
+            sid = item.get("screenshot_id")
+            if sid in labels:
+                evidence.append({"screenshot_id": sid, "scene_label": labels[sid]})
+        finding["evidence"] = evidence
+    details = result.setdefault("details", {})
+    details["per_image"] = [
+        {"screenshot_id": item["screenshot_id"],
+         "scene_label": labels[item["screenshot_id"]],
+         "observation": item.get("visible_summary", "")}
+        for item in observations
+    ]
+    result["findings"] = result.get("findings", [])[:3]
+    result["perspectives"] = result.get("perspectives", [])[:3]
+    result["priority_actions"] = result.get("priority_actions", [])[:3]
+    result["evidence_gaps"] = result.get("evidence_gaps", [])[:3]
+    return result
+
+
+def _set_conversation_status(cid, **values):
+    def apply(conversation):
+        conversation.setdefault("status", {}).update(values)
+        conversation["status"]["updated_at"] = datetime.now().isoformat()
+        conversation["updated_at"] = datetime.now().isoformat()
+    update_conversation_record(cid, apply)
+
+
+def _run_conversation_analysis(cid, run_id, question, angle, mode, ordered_ids, settings):
+    failures = []
+    try:
+        conversation = load_conversations().get(cid)
+        if not conversation:
+            return
+        metadata = load_screenshot_metadata()
+        indexed = load_analysis()
+        ids = ordered_ids if mode == "journey" else list(conversation.get("screenshot_ids", []))
+        items = [(sid, _find_screenshot_path(sid)) for sid in ids]
+        items = [(sid, path) for sid, path in items if path]
+        if not items:
+            raise ValueError("未找到任何截图文件")
+        _set_conversation_status(cid, state="analyzing", phase="evidence", processed=0,
+                                 total=len(items), failed=0, error=None, run_id=run_id)
+        cache = _load_json_object(OBSERVATIONS_FILE)
+        observations = [None] * len(items)
+        pending = []
+        for index, (sid, path) in enumerate(items):
+            signature = _observation_signature(path, settings)
+            cached = cache.get(sid, {})
+            if cached.get("signature") == signature and cached.get("observation"):
+                observations[index] = cached["observation"]
+            else:
+                pending.append((index, sid, path, signature))
+
+        def inspect_one(entry):
+            index, sid, path, signature = entry
+            observation = observe_screenshot(
+                path, sid, metadata.get(sid, {}).get("app", ""),
+                indexed.get(sid, {}).get("ocr_text", ""), settings,
+            )
+            observation["screenshot_id"] = sid
+            observation["app"] = metadata.get(sid, {}).get("app") or "未归类"
+            return index, sid, signature, observation
+
+        completed = len(items) - len(pending)
+        if pending:
+            with ThreadPoolExecutor(max_workers=min(3, len(pending))) as pool:
+                futures = {pool.submit(inspect_one, entry): entry for entry in pending}
+                for future in as_completed(futures):
+                    entry = futures[future]
+                    try:
+                        index, sid, signature, observation = future.result()
+                        observations[index] = observation
+                        cache[sid] = {"signature": signature, "observation": observation,
+                                      "observed_at": datetime.now().isoformat()}
+                    except Exception as exc:
+                        failures.append({"screenshot_id": entry[1], "error": str(exc)})
+                        print(f"  ✗ 截图观察失败 [{entry[1]}]: {type(exc).__name__}: {exc}")
+                    completed += 1
+                    _save_json_object(OBSERVATIONS_FILE, cache)
+                    _set_conversation_status(cid, state="analyzing", phase="evidence",
+                                             processed=completed, total=len(items),
+                                             failed=len(failures), failed_items=failures[-10:])
+
+        observations = [item for item in observations if item]
+        if not observations:
+            first_error = failures[0]["error"] if failures else "未知错误"
+            raise ValueError(f"所有截图都分析失败。首个错误：{first_error}")
+        for index, observation in enumerate(observations, 1):
+            observation["sequence_index"] = index if mode == "journey" else None
+        _set_conversation_status(cid, state="analyzing", phase="synthesis",
+                                 processed=len(items), failed=len(failures))
+        result = synthesize_quick_brief(question, angle, observations,
+                                        ordered=mode == "journey", settings=settings)
+        result = _sanitize_quick_result(result, observations)
+        completed_at = datetime.now().isoformat()
+        result["meta"] = {"run_id": run_id, "provider": settings["provider"],
+                          "model": settings["model"], "completed_at": completed_at,
+                          "analyzed_count": len(observations), "failed_items": failures}
+
+        def finish(current):
+            current["question"] = question
+            current["angle"] = angle
+            current["mode"] = mode
+            current["screenshot_order"] = ordered_ids if mode == "journey" else []
+            current["result"] = result
+            if current.get("title") in ("新分析", "未命名分析"):
+                current["title"] = question[:24]
+            current["status"] = {"state": "complete", "phase": "complete",
+                                 "processed": len(items), "total": len(items),
+                                 "failed": len(failures), "run_id": run_id,
+                                 "updated_at": completed_at}
+            current["updated_at"] = completed_at
+            runs = current.setdefault("runs", [])
+            runs.insert(0, {"run_id": run_id, "question": question,
+                            "completed_at": completed_at, "result": result})
+            current["runs"] = runs[:5]
+        update_conversation_record(cid, finish)
+    except Exception as exc:
+        print(f"  ✗ 分析对话失败 [{cid}]: {exc}")
+        _set_conversation_status(cid, state="failed", phase="failed", error=str(exc),
+                                 run_id=run_id, failed_items=failures[-10:])
+
+
+@app.get("/api/conversations")
+async def api_list_conversations():
+    return sorted(all_conversations().values(),
+                  key=lambda item: item.get("updated_at") or item.get("created_at") or "",
+                  reverse=True)
+
+
+@app.post("/api/conversations")
+async def api_create_conversation(req: Request):
+    body = await req.json()
+    ids = list(dict.fromkeys(body.get("screenshot_ids") or []))
+    valid_ids = {sid for sid in ids if _find_screenshot_path(sid)}
+    ids = [sid for sid in ids if sid in valid_ids]
+    if not ids:
+        return JSONResponse({"ok": False, "error": "请至少选择一张截图"}, status_code=400)
+    now = datetime.now().isoformat()
+    cid = f"conv_{uuid.uuid4().hex[:10]}"
+    conversation = {"id": cid, "title": "新分析", "screenshot_ids": ids,
+                    "project_id": body.get("project_id"), "question": "", "angle": "",
+                    "mode": "quick", "screenshot_order": [],
+                    "status": {"state": "draft", "processed": 0, "total": len(ids)},
+                    "result": None, "runs": [], "created_at": now, "updated_at": now}
+    conversations = load_conversations()
+    conversations[cid] = conversation
+    save_conversations(conversations)
+    return {"ok": True, "conversation": conversation}
+
+
+@app.put("/api/conversations/{cid}")
+async def api_update_conversation(cid: str, req: Request):
+    conversations = load_conversations()
+    if cid not in conversations:
+        return JSONResponse({"ok": False, "error": "分析对话不存在"}, status_code=404)
+    body = await req.json()
+    conversation = conversations[cid]
+    if "title" in body:
+        title = (body.get("title") or "").strip()
+        if not title:
+            return JSONResponse({"ok": False, "error": "名称不能为空"}, status_code=400)
+        conversation["title"] = title
+    if "project_id" in body:
+        project_id = body.get("project_id")
+        if project_id and project_id not in load_projects():
+            return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=400)
+        conversation["project_id"] = project_id
+    conversation["updated_at"] = datetime.now().isoformat()
+    save_conversations(conversations)
+    return {"ok": True, "conversation": conversation}
+
+
+@app.delete("/api/conversations/{cid}")
+async def api_delete_conversation(cid: str):
+    conversations = load_conversations()
+    if cid not in conversations:
+        return JSONResponse({"ok": False, "error": "分析对话不存在"}, status_code=404)
+    del conversations[cid]
+    save_conversations(conversations)
+    return {"ok": True}
+
+
+@app.post("/api/conversations/{cid}/analyze")
+async def api_analyze_conversation(cid: str, req: Request, background_tasks: BackgroundTasks):
+    conversations = load_conversations()
+    if cid not in conversations:
+        return JSONResponse({"ok": False, "error": "分析对话不存在"}, status_code=404)
+    conversation = conversations[cid]
+    body = await req.json()
+    question = (body.get("question") or "").strip()
+    angle = (body.get("angle") or "").strip()
+    mode = "journey" if angle == "还原关键操作路径" else "quick"
+    if len(question) < 4:
+        return JSONResponse({"ok": False, "error": "请写下你想借鉴或验证的问题"}, status_code=400)
+    ids = list(conversation.get("screenshot_ids", []))
+    ordered_ids = body.get("screenshot_order") or ids
+    if mode == "journey" and (set(ordered_ids) != set(ids) or len(ordered_ids) != len(ids)):
+        return JSONResponse({"ok": False, "error": "截图顺序与对话附件不一致"}, status_code=400)
+    if conversation.get("status", {}).get("state") in ("queued", "analyzing"):
+        return JSONResponse({"ok": False, "error": "这条分析正在进行中"}, status_code=409)
+    try:
+        settings = _require_key()
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    conversation["question"] = question
+    conversation["angle"] = angle
+    conversation["mode"] = mode
+    conversation["status"] = {"state": "queued", "phase": "queued", "processed": 0,
+                              "total": len(ids), "run_id": run_id}
+    conversation["updated_at"] = datetime.now().isoformat()
+    save_conversations(conversations)
+    background_tasks.add_task(_run_conversation_analysis, cid, run_id, question, angle,
+                              mode, ordered_ids, settings)
+    return {"ok": True, "run_id": run_id}
+
+
+@app.get("/api/conversations/{cid}/analysis-status")
+async def api_conversation_analysis_status(cid: str):
+    conversation = all_conversations().get(cid)
+    if not conversation:
+        return JSONResponse({"ok": False, "error": "分析对话不存在"}, status_code=404)
+    return {"ok": True, "status": conversation.get("status", {"state": "draft"}),
+            "has_result": bool(conversation.get("result"))}
 
 
 # ── API: Favorites & Notes ───────────────────────────────────────────

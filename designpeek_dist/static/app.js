@@ -85,6 +85,8 @@ let state = {
   stats: null,
   currentTab: 'screenshots',
   projects: [],
+  conversations: [],
+  currentConversation: null,
   folders: [],
   currentFolderId: null,
   folderPickerId: null,
@@ -114,7 +116,7 @@ let state = {
 // ── Init ─────────────────────────────────────────────────
 
 async function init() {
-  await Promise.all([loadStats(), loadScreenshots(), loadProjects(), loadFolders()]);
+  await Promise.all([loadStats(), loadScreenshots(), loadProjects(), loadConversations(), loadFolders()]);
   state.screenshotSignature = buildScreenshotSignature(state.screenshots);
   renderAppFilters();
   renderFolderFilters();
@@ -125,8 +127,12 @@ async function init() {
   startRealtimeRefresh();
 
   // Restore last tab from sessionStorage
+  const requestedConversation = new URLSearchParams(location.search).get('conversation');
   const lastTab = sessionStorage.getItem('dp_tab');
-  if (lastTab) switchTab(lastTab);
+  if (requestedConversation && state.conversations.some(item => item.id === requestedConversation)) {
+    switchTab('projects');
+    selectConversation(requestedConversation);
+  } else if (lastTab) switchTab(lastTab);
 }
 
 function setupProjectFilters() {
@@ -136,6 +142,7 @@ function setupProjectFilters() {
       document.querySelectorAll('#projectStatusFilters .filter-item').forEach(el =>
         el.classList.toggle('active', el.dataset.filter === state.projectFilter));
       state.currentProject = null;
+      state.currentConversation = null;
       renderProjectNav();
       renderProjectList();
     });
@@ -153,6 +160,7 @@ function setupTabs() {
 function switchTab(tab) {
   state.currentTab = tab;
   state.currentProject = null;
+  state.currentConversation = null;
   sessionStorage.setItem('dp_tab', tab);
   state.batchMode = false;
   state.selected.clear();
@@ -205,6 +213,13 @@ async function loadScreenshots() {
 async function loadProjects() {
   const res = await fetch('/api/projects');
   state.projects = await res.json();
+  updateProjectCounts();
+  renderProjectNav();
+}
+
+async function loadConversations() {
+  const res = await fetch('/api/conversations');
+  state.conversations = await res.json();
   updateProjectCounts();
   renderProjectNav();
 }
@@ -283,7 +298,7 @@ async function autoRefreshScreenshots() {
     if (state.currentTab === 'screenshots') {
       renderGrid();
       if (newCount > 0) showToast(`已同步 ${newCount} 张新截图`);
-    } else if (state.currentTab === 'projects' && !state.currentProject) {
+    } else if (state.currentTab === 'projects' && !state.currentProject && !state.currentConversation) {
       renderProjectList();
     }
   } catch (err) {
@@ -292,11 +307,8 @@ async function autoRefreshScreenshots() {
 }
 
 function updateProjectCounts() {
-  const all = state.projects.length;
-  const analyzed = state.projects.filter(p => p.analysis).length;
+  const all = state.conversations.length;
   document.getElementById('countAllProjects').textContent = all;
-  document.getElementById('countPending').textContent = all - analyzed;
-  document.getElementById('countAnalyzedProjects').textContent = analyzed;
 }
 
 // ── Sidebar: Project Nav ─────────────────────────────────
@@ -323,6 +335,7 @@ function selectProject(pid) {
   const proj = state.projects.find(p => p.id === pid);
   if (!proj) return;
   state.currentProject = proj;
+  state.currentConversation = null;
   state.batchMode = false;
   state.manageMode = false;
   state.editingAnalysisBrief = false;
@@ -334,6 +347,7 @@ function selectProject(pid) {
   document.getElementById('viewScreenshots').classList.remove('active');
   document.getElementById('viewProject').classList.add('active');
   document.getElementById('projectViewTitle').textContent = proj.name;
+  ['btnShareConversation', 'btnRenameConversation', 'btnDeleteConversation'].forEach(id => document.getElementById(id).style.display = 'none');
   renderProjectDetail();
 }
 
@@ -771,7 +785,7 @@ function toggleBatchMode() {
 function renderBatchProjectBtns() {
   const el = document.getElementById('batchProjectBtns');
   if (!el) return;
-  el.innerHTML = '<button class="btn btn-secondary btn-sm" onclick="batchImportProject()">加入分析项目</button>';
+  el.innerHTML = '<button class="btn btn-primary btn-sm" onclick="startConversationFromSelection()">开始分析</button>';
 }
 
 async function _doImportToProject(pid) {
@@ -2177,8 +2191,9 @@ async function createProject() {
     hideCreateProject();
     await loadProjects();
     if (state.batchMode) renderBatchProjectBtns();
-    selectProject(data.project.id);
-    showToast('项目已创建');
+    state.currentProject = null;
+    renderProjectList();
+    showToast('项目已创建，可将分析对话拖入归档');
   }
 }
 
@@ -2920,6 +2935,333 @@ function clearSearch() {
   state.searchIndexing = false;
   state.searchProgress = null;
   renderGrid();
+}
+
+// ── Analysis conversations ──────────────────────────────
+
+async function startConversationFromSelection() {
+  if (!state.selected.size) { showToast('请先选择截图'); return; }
+  const res = await fetch('/api/conversations', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ screenshot_ids: [...state.selected] }),
+  });
+  const data = await res.json();
+  if (!data.ok) { showToast(data.error || '无法开始分析'); return; }
+  state.selected.clear();
+  await loadConversations();
+  switchTab('projects');
+  selectConversation(data.conversation.id);
+}
+
+function backToProjectList() {
+  state.currentProject = null;
+  state.currentConversation = null;
+  renderProjectNav();
+  renderProjectList();
+}
+
+function renderProjectNav() {
+  const el = document.getElementById('projectNavList');
+  if (!el) return;
+  if (!state.projects.length) {
+    el.innerHTML = '<div class="nav-empty">暂无项目</div>';
+    return;
+  }
+  const children = new Map();
+  state.projects.forEach(project => {
+    const parent = state.projects.some(item => item.id === project.parent_id) ? project.parent_id : null;
+    if (!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(project);
+  });
+  const renderLevel = (parentId, depth = 0) => (children.get(parentId) || []).map(project => `
+    <div class="nav-item nav-item-proj project-drop-target ${state.currentProject?.id === project.id ? 'active' : ''}"
+         style="--project-depth:${depth}" draggable="true" ondragstart="startProjectDrag(event, '${project.id}')"
+         onclick="showProjectConversations('${project.id}')"
+         ondragover="event.preventDefault();this.classList.add('drag-over')"
+         ondragleave="this.classList.remove('drag-over')"
+         ondrop="dropConversationIntoProject(event, '${project.id}')">
+      <div class="project-nav-main"><span class="project-folder-mark">▰</span><span class="project-card-name">${escapeHtml(project.name)}</span></div>
+      <div class="project-card-meta">${project.conversation_count || 0} 个分析</div>
+      <div class="project-nav-actions"><button onclick="event.stopPropagation();renameProjectContainer('${project.id}')" title="重命名">✎</button><button onclick="event.stopPropagation();deleteProjectContainer('${project.id}')" title="删除">×</button></div>
+    </div>${renderLevel(project.id, depth + 1)}`).join('');
+  el.innerHTML = renderLevel(null);
+}
+
+function renderProjectList(projectId = null) {
+  const el = document.getElementById('projectContent');
+  if (!el) return;
+  hideLegacyToolbarButtons();
+  document.getElementById('projectToolbar').style.display = 'none';
+  let items = state.conversations;
+  if (projectId) items = items.filter(item => item.project_id === projectId);
+  const project = state.projects.find(item => item.id === projectId);
+  const heading = project ? escapeHtml(project.name) : '最近分析';
+  const cards = items.map(renderConversationListCard).join('');
+  el.innerHTML = `<div class="conversation-home"><div class="conversation-list-head"><div><span>分析对话</span><h1>${heading}</h1></div><small>${items.length} 个对话</small></div>${cards || '<div class="conversation-empty">从截图页批量选择图片，然后点击「开始分析」</div>'}</div>`;
+}
+
+function renderConversationListCard(item) {
+  const ssMap = getSsMap();
+  const thumbs = (item.screenshot_ids || []).slice(0, 4).map(id => {
+    const ss = ssMap[id];
+    return ss ? `<img src="/screenshots/${ss.path}" alt="">` : '';
+  }).join('');
+  const stateLabel = item.result ? '已完成' : item.status?.state === 'analyzing' ? '分析中' : '待提问';
+  return `<article class="conversation-list-card" draggable="${item.legacy ? 'false' : 'true'}"
+      ondragstart="startConversationDrag(event, '${item.id}')" onclick="selectConversation('${item.id}')">
+    <div class="conversation-card-copy"><div class="conversation-card-title">${escapeHtml(item.title || '新分析')}</div><p>${escapeHtml(item.question || '还没有填写问题')}</p><div class="conversation-card-meta"><span>${(item.screenshot_ids || []).length} 张截图</span><span>${stateLabel}</span>${item.legacy ? '<span>旧版分析</span>' : ''}</div></div>
+    <div class="conversation-card-thumbs">${thumbs}</div><span class="conversation-card-arrow">›</span>
+  </article>`;
+}
+
+function showProjectConversations(pid) {
+  state.currentProject = state.projects.find(item => item.id === pid) || null;
+  state.currentConversation = null;
+  renderProjectNav();
+  renderProjectList(pid);
+}
+
+function selectConversation(cid) {
+  const conversation = state.conversations.find(item => item.id === cid);
+  if (!conversation) return;
+  if (conversation.legacy) {
+    const project = state.projects.find(item => `legacy_${item.id}` === cid);
+    if (project) selectProject(project.id);
+    return;
+  }
+  state.currentConversation = conversation;
+  state.currentProject = null;
+  state.draftScreenshotOrder = [...(conversation.screenshot_order?.length ? conversation.screenshot_order : conversation.screenshot_ids || [])];
+  document.getElementById('projectToolbar').style.display = '';
+  hideLegacyToolbarButtons();
+  ['btnShareConversation', 'btnRenameConversation', 'btnDeleteConversation'].forEach(id => document.getElementById(id).style.display = '');
+  document.getElementById('projectViewTitle').textContent = conversation.title || '新分析';
+  renderProjectNav();
+  renderConversationDetail();
+  history.replaceState(null, '', `/?conversation=${encodeURIComponent(cid)}`);
+}
+
+function hideLegacyToolbarButtons() {
+  ['btnAddScreenshots', 'btnManageScreenshots', 'btnAnalyzeProject', 'btnDeleteProject'].forEach(id => {
+    const element = document.getElementById(id); if (element) element.style.display = 'none';
+  });
+  ['btnShareConversation', 'btnRenameConversation', 'btnDeleteConversation'].forEach(id => {
+    const element = document.getElementById(id); if (element) element.style.display = state.currentConversation ? '' : 'none';
+  });
+}
+
+function renderConversationDetail() {
+  const conversation = state.currentConversation;
+  if (!conversation) return;
+  const el = document.getElementById('projectContent');
+  const status = conversation.status || { state: 'draft' };
+  if (['queued', 'analyzing'].includes(status.state)) {
+    el.innerHTML = renderConversationProgress(conversation);
+    startConversationPolling(conversation.id);
+  } else if (conversation.result) {
+    el.innerHTML = renderDecisionBrief(conversation);
+  } else {
+    el.innerHTML = renderConversationComposer(conversation);
+  }
+}
+
+function conversationAttachmentGrid(conversation) {
+  const ssMap = getSsMap();
+  return `<div class="conversation-attachments">${(conversation.screenshot_ids || []).map(id => {
+    const ss = ssMap[id];
+    if (!ss) return '';
+    return `<button onclick="openConversationLightbox('${id}')"><img src="/screenshots/${ss.path}" alt="${escapeHtml(ss.app || '')}"><span>${escapeHtml(ss.app || '未归类')}</span></button>`;
+  }).join('')}</div>`;
+}
+
+const ANALYSIS_ANGLES = [
+  ['找可借鉴的做法', '这些截图中有哪些值得借鉴的设计做法？'],
+  ['找体验问题与风险', '这些截图中有哪些体验问题与设计风险？'],
+  ['看信息层级与视觉表达', '这些页面如何组织信息层级与视觉表达，有哪些可借鉴或需规避之处？'],
+  ['还原关键操作路径', '请还原这组截图中的关键操作路径，并指出连续性问题与优化机会。'],
+  ['比较不同竞品的解法', '不同竞品分别如何解决同一个用户任务，各自的优劣与借鉴点是什么？'],
+];
+
+function renderConversationComposer(conversation) {
+  const error = conversation.status?.state === 'failed' ? conversation.status.error : '';
+  const angle = conversation.angle || '';
+  return `<div class="conversation-workbench">
+    <section class="conversation-compose"><div class="conversation-eyebrow">${(conversation.screenshot_ids || []).length} 张截图已附加</div>
+      <h1>你想借鉴或验证什么？</h1>
+      <textarea id="conversationQuestion" placeholder="你想借鉴或验证什么？&#10;例如：&#10;· 竞品如何让用户发现新品？&#10;· 商品卡如何突出新品、价格和促销？&#10;· 从首页到详情，信息怎样保持连续？&#10;· 哪些设计值得借鉴，哪些风险要避开？&#10;常用角度：入口与导航 · 信息层级与视觉表达 · 操作路径与反馈 · 决策与信任 · 跨场景一致性">${escapeHtml(conversation.question || '')}</textarea>
+      <div class="analysis-angle-tags">${ANALYSIS_ANGLES.map(([name]) => `<button class="${angle === name ? 'active' : ''}" onclick="chooseAnalysisAngle('${name}')">${name}</button>`).join('')}</div>
+      ${angle === '还原关键操作路径' ? renderConversationOrderEditor(conversation) : ''}
+      ${error ? `<div class="analysis-inline-error">${escapeHtml(error)}</div>` : ''}
+      <div class="conversation-submit"><span>AI 会自动选择最多 3 个最相关角度</span><button class="btn btn-primary" onclick="analyzeConversation()">开始分析</button></div>
+    </section><section><div class="workbench-section-head"><strong>截图证据</strong><span>点击查看原图</span></div>${conversationAttachmentGrid(conversation)}</section>
+  </div>`;
+}
+
+function chooseAnalysisAngle(name) {
+  const question = document.getElementById('conversationQuestion')?.value || '';
+  const conversation = state.currentConversation;
+  if (!conversation) return;
+  conversation.question = question.trim() || (ANALYSIS_ANGLES.find(item => item[0] === name)?.[1] || '');
+  conversation.angle = conversation.angle === name ? '' : name;
+  renderConversationDetail();
+  requestAnimationFrame(() => document.getElementById('conversationQuestion')?.focus());
+}
+
+function renderConversationOrderEditor(conversation) {
+  const ssMap = getSsMap();
+  const items = state.draftScreenshotOrder.map((sid, index) => {
+    const ss = ssMap[sid]; if (!ss) return '';
+    return `<div class="sequence-item" draggable="true" ondragstart="startSequenceDrag(event, ${index})" ondragover="event.preventDefault()" ondrop="dropConversationSequence(event, ${index})" ondragend="endSequenceDrag()"><span class="sequence-index">${index + 1}</span><img src="/screenshots/${ss.path}" alt=""><div><strong>${escapeHtml(ss.app || '未归类')}</strong><small>第 ${index + 1} 步</small></div><div class="sequence-actions"><button onclick="event.stopPropagation();moveConversationScreenshot(${index},-1)" ${index === 0 ? 'disabled' : ''}>↑</button><button onclick="event.stopPropagation();moveConversationScreenshot(${index},1)" ${index === state.draftScreenshotOrder.length - 1 ? 'disabled' : ''}>↓</button></div></div>`;
+  }).join('');
+  return `<div class="sequence-editor"><div class="sequence-heading"><strong>确认关键路径顺序</strong><span>只有本次路径分析会使用此顺序</span></div><div class="sequence-list">${items}</div></div>`;
+}
+
+function dropConversationSequence(event, targetIndex) {
+  event.preventDefault();
+  const sourceIndex = state.sequenceDragIndex;
+  if (sourceIndex === null || sourceIndex === targetIndex) return;
+  const question = document.getElementById('conversationQuestion')?.value || '';
+  const [id] = state.draftScreenshotOrder.splice(sourceIndex, 1);
+  state.draftScreenshotOrder.splice(targetIndex, 0, id);
+  state.currentConversation.question = question;
+  renderConversationDetail();
+}
+
+function moveConversationScreenshot(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= state.draftScreenshotOrder.length) return;
+  const question = document.getElementById('conversationQuestion')?.value || '';
+  [state.draftScreenshotOrder[index], state.draftScreenshotOrder[target]] = [state.draftScreenshotOrder[target], state.draftScreenshotOrder[index]];
+  state.currentConversation.question = question;
+  renderConversationDetail();
+}
+
+async function analyzeConversation() {
+  const conversation = state.currentConversation;
+  const question = document.getElementById('conversationQuestion')?.value.trim() || '';
+  if (question.length < 4) { showToast('请先写下你想借鉴或验证的问题'); return; }
+  const button = document.querySelector('.conversation-submit .btn-primary');
+  if (button) { button.disabled = true; button.textContent = '正在启动...'; }
+  const res = await fetch(`/api/conversations/${conversation.id}/analyze`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question, angle: conversation.angle || '', screenshot_order: state.draftScreenshotOrder }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    showToast(data.error || '无法开始分析');
+    if ((data.error || '').includes('API Key')) showAISettings();
+    if (button) { button.disabled = false; button.textContent = '开始分析'; }
+    return;
+  }
+  conversation.question = question;
+  conversation.status = { state: 'queued', processed: 0, total: conversation.screenshot_ids.length };
+  renderConversationDetail();
+}
+
+function renderConversationProgress(conversation) {
+  const status = conversation.status || {};
+  const processed = status.processed || 0, total = status.total || conversation.screenshot_ids.length;
+  const percent = total ? Math.round(processed / total * 100) : 0;
+  const synthesis = status.phase === 'synthesis';
+  return `<div class="analysis-progress-panel"><div class="analysis-progress-mark"></div><h2>${synthesis ? '正在形成决策速览' : '正在读取截图证据'}</h2><p>${synthesis ? '客观观察已整理完成，正在回答你的问题。' : `已处理 ${processed} / ${total} 张；已分析过的图片会直接复用观察。`}</p><div class="analysis-progress-track"><span style="width:${synthesis ? 100 : percent}%"></span></div>${status.failed ? `<small>${status.failed} 张暂未成功，其余截图会继续分析</small>` : ''}</div>`;
+}
+
+function startConversationPolling(cid) {
+  clearInterval(state.analysisPollTimer);
+  state.analysisPollTimer = setInterval(async () => {
+    if (state.currentConversation?.id !== cid) { clearInterval(state.analysisPollTimer); return; }
+    const res = await fetch(`/api/conversations/${cid}/analysis-status`);
+    const data = await res.json(); if (!data.ok) return;
+    if (['complete', 'failed'].includes(data.status.state)) {
+      clearInterval(state.analysisPollTimer);
+      await loadConversations();
+      state.currentConversation = state.conversations.find(item => item.id === cid) || null;
+      renderConversationDetail();
+      renderProjectNav();
+      showToast(data.status.state === 'complete' ? '决策速览已生成' : `分析失败：${data.status.error || '未知错误'}`);
+    } else {
+      state.currentConversation.status = data.status;
+      document.getElementById('projectContent').innerHTML = renderConversationProgress(state.currentConversation);
+    }
+  }, 1200);
+}
+
+function renderDecisionBrief(conversation) {
+  const result = conversation.result || {}, meta = result.meta || {}, details = result.details || {};
+  const findings = (result.findings || []).map((item, index) => `<article class="decision-finding"><div class="decision-finding-index">0${index + 1}</div><div><div class="finding-title-line"><h3>${escapeHtml(item.title || '')}</h3><span class="confidence ${escapeHtml(item.confidence || '')}">${confidenceLabel(item.confidence)}</span></div><div class="decision-field"><b>竞品观察</b><p>${escapeHtml(item.observation || '')}</p></div><div class="decision-field insight"><b>对我的启示</b><p>${escapeHtml(item.implication || '')}</p></div><div class="decision-field action"><b>建议行动</b><p>${escapeHtml(item.action || '')}</p></div>${item.to_validate ? `<div class="decision-validation"><b>待验证</b>${escapeHtml(item.to_validate)}</div>` : ''}<div class="evidence-thumbs">${renderConversationEvidence(item.evidence || [])}</div></div></article>`).join('');
+  const actions = (result.priority_actions || []).map(item => `<div class="priority-action"><span class="priority ${item.priority === 'high' ? 'high' : ''}">${item.priority === 'high' ? '高' : '中'}</span><div><strong>${escapeHtml(item.action || '')}</strong><p>${escapeHtml(item.reason || '')}</p></div></div>`).join('');
+  const gaps = (result.evidence_gaps || []).map(item => `<div class="evidence-gap"><strong>${escapeHtml(item.gap || '')}</strong><span>建议补充：${escapeHtml(item.suggested_screenshot || '')}</span></div>`).join('');
+  const perImage = (details.per_image || []).map(item => `<div class="detail-evidence-row"><strong>${escapeHtml(item.scene_label || '截图证据')}</strong><p>${escapeHtml(item.observation || '')}</p>${renderConversationEvidence([{ screenshot_id: item.screenshot_id, scene_label: item.scene_label }])}</div>`).join('');
+  return `<div class="decision-brief"><header class="decision-header"><span>${escapeHtml(result.kind || '竞品诊断')} · 决策速览</span><h1>${escapeHtml(conversation.question || '')}</h1><p>${escapeHtml(result.conclusion || '')}</p><div class="decision-meta"><span>${meta.analyzed_count || conversation.screenshot_ids.length} 张证据</span>${(result.perspectives || []).map(item => `<b>${escapeHtml(item)}</b>`).join('')}</div></header><section class="decision-section"><div class="decision-section-head"><h2>核心发现</h2><span>观察、启示与行动分开呈现</span></div>${findings}</section><div class="decision-bottom-grid"><section><div class="decision-section-head"><h2>优先行动</h2></div>${actions || '<p class="empty-state-inline">暂无明确行动</p>'}</section><section><div class="decision-section-head"><h2>证据缺口</h2></div>${gaps || '<p class="empty-state-inline">当前证据足以形成初步判断</p>'}</section></div><details class="all-evidence"><summary>查看全部证据</summary><div class="all-evidence-content"><h3>逐图客观观察</h3>${perImage}<h3>方法与验证</h3><p>${escapeHtml(details.methodology || '基于静态截图的可见证据进行启发式归纳。')}</p>${(details.validation_metrics || []).map(item => `<p><strong>${escapeHtml(item.hypothesis || '')}</strong>：${escapeHtml(item.metric || '')}</p>`).join('')}</div></details><section class="follow-up-compose"><h2>继续追问这批截图</h2><textarea id="conversationQuestion" rows="2" placeholder="换一个问题，截图客观观察会直接复用"></textarea><div class="conversation-submit"><span>不会重新读取已有图片</span><button class="btn btn-primary" onclick="analyzeConversation()">继续分析</button></div></section></div>`;
+}
+
+function renderConversationEvidence(evidence) {
+  const ssMap = getSsMap();
+  return evidence.map(item => {
+    const ss = ssMap[item.screenshot_id]; if (!ss) return '';
+    return `<button class="evidence-thumb labeled" onclick="openConversationLightbox('${item.screenshot_id}')"><img src="/screenshots/${ss.path}" alt=""><span>${escapeHtml(item.scene_label || '截图证据')}</span></button>`;
+  }).join('');
+}
+
+function openConversationLightbox(id) {
+  const ids = new Set(state.currentConversation?.screenshot_ids || []);
+  const items = state.screenshots.filter(item => ids.has(item.id));
+  const index = items.findIndex(item => item.id === id); if (index < 0) return;
+  state.lightboxItems = items; state.lightboxIndex = index; showLightboxImage();
+  document.getElementById('lightbox').style.display = 'flex'; document.body.style.overflow = 'hidden';
+}
+
+async function shareConversation() {
+  if (!state.currentConversation) return;
+  const url = `${location.origin}/?conversation=${encodeURIComponent(state.currentConversation.id)}`;
+  await navigator.clipboard.writeText(url); showToast('对话链接已复制');
+}
+
+async function renameConversation() {
+  const conversation = state.currentConversation; if (!conversation) return;
+  const title = prompt('分析对话名称', conversation.title || ''); if (!title?.trim()) return;
+  const res = await fetch(`/api/conversations/${conversation.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: title.trim() }) });
+  const data = await res.json(); if (!data.ok) { showToast(data.error || '重命名失败'); return; }
+  await loadConversations(); selectConversation(conversation.id); showToast('已重命名');
+}
+
+async function deleteConversation() {
+  const conversation = state.currentConversation; if (!conversation || !confirm('删除这条分析对话？截图素材不会被删除。')) return;
+  const res = await fetch(`/api/conversations/${conversation.id}`, { method: 'DELETE' });
+  const data = await res.json(); if (!data.ok) { showToast(data.error || '删除失败'); return; }
+  state.currentConversation = null; history.replaceState(null, '', '/'); await Promise.all([loadConversations(), loadProjects()]); backToProjectList(); showToast('对话已删除，截图仍保留');
+}
+
+function startConversationDrag(event, cid) { event.dataTransfer.setData('text/designpeek-conversation', cid); event.dataTransfer.effectAllowed = 'move'; }
+function startProjectDrag(event, pid) { event.stopPropagation(); event.dataTransfer.setData('text/designpeek-project', pid); event.dataTransfer.effectAllowed = 'move'; }
+async function dropConversationIntoProject(event, pid) {
+  event.preventDefault(); event.currentTarget.classList.remove('drag-over');
+  const sourceProject = event.dataTransfer.getData('text/designpeek-project');
+  if (sourceProject) {
+    if (sourceProject === pid) return;
+    const response = await fetch(`/api/projects/${sourceProject}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parent_id: pid }) });
+    const projectData = await response.json();
+    if (!projectData.ok) { showToast(projectData.error || '移动项目失败'); return; }
+    await loadProjects(); showToast('已设为上级项目'); return;
+  }
+  const cid = event.dataTransfer.getData('text/designpeek-conversation'); if (!cid || cid.startsWith('legacy_')) return;
+  const res = await fetch(`/api/conversations/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id: pid }) });
+  const data = await res.json(); if (!data.ok) { showToast(data.error || '移动失败'); return; }
+  await Promise.all([loadConversations(), loadProjects()]); renderProjectList(state.currentProject?.id || null); showToast('已移入项目');
+}
+
+async function renameProjectContainer(pid) {
+  const project = state.projects.find(item => item.id === pid); if (!project) return;
+  const name = prompt('项目名称', project.name); if (!name?.trim()) return;
+  await fetch(`/api/projects/${pid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
+  await loadProjects(); renderProjectList(state.currentProject?.id || null); showToast('项目已重命名');
+}
+
+async function deleteProjectContainer(pid) {
+  if (!confirm('删除这个项目？其中的分析对话会回到“最近分析”，截图不会删除。')) return;
+  const res = await fetch(`/api/projects/${pid}`, { method: 'DELETE' }); const data = await res.json();
+  if (!data.ok) { showToast(data.error || '删除失败'); return; }
+  state.currentProject = null; await Promise.all([loadProjects(), loadConversations()]); renderProjectList(); showToast('项目已删除，对话与截图均已保留');
 }
 
 // ── Start ────────────────────────────────────────────────
