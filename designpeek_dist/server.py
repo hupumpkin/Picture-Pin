@@ -2,6 +2,7 @@
 """DesignPeek — 竞品截图整理分析工具"""
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -13,14 +14,13 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from config import (
     ANALYSIS_FILE,
-    AI_PROVIDER,
     DATA_DIR,
     HOST,
     INBOX_DIR,
@@ -29,7 +29,15 @@ from config import (
     PROJECTS_FILE,
     SCREENSHOTS_DIR,
 )
-from analyzer import analyze_project, analyze_screenshot, _require_key
+from ai_settings import public_ai_settings, save_ai_settings
+from analyzer import (
+    _require_key,
+    analyze_screenshot,
+    analyze_screenshot_evidence,
+    suggest_dimensions,
+    synthesize_project,
+    test_ai_connection,
+)
 
 # OCR via macOS Vision framework
 try:
@@ -47,6 +55,7 @@ OCR_SWIFT_SOURCE = os.path.join(os.path.dirname(__file__), "ocr.swift")
 OCR_BINARY = os.path.join(DATA_DIR, "designpeek_ocr")
 _OCR_BUILD_LOCK = threading.Lock()
 _ANALYSIS_WRITE_LOCK = threading.Lock()
+_PROJECTS_WRITE_LOCK = threading.Lock()
 _OCR_AVAILABLE = _PYOBJC_OCR_AVAILABLE or bool(shutil.which("swiftc") or shutil.which("xcrun"))
 _OCR_INDEX_STATE = {"running": False, "processed": 0, "total": 0, "error": None}
 
@@ -187,6 +196,17 @@ def load_projects():
 def save_projects(data):
     with open(PROJECTS_FILE, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def update_project_record(pid, updater):
+    """Update one project without overwriting changes made by another request."""
+    with _PROJECTS_WRITE_LOCK:
+        projects = load_projects()
+        if pid not in projects:
+            return None
+        updater(projects[pid])
+        save_projects(projects)
+        return projects[pid]
 
 
 def load_folders():
@@ -866,6 +886,34 @@ async def api_delete_folder(fid: str):
 
 # ── API: Projects ────────────────────────────────────────────────────
 
+@app.get("/api/ai-settings")
+async def api_get_ai_settings():
+    return public_ai_settings()
+
+
+@app.put("/api/ai-settings")
+async def api_save_ai_settings(req: Request):
+    body = await req.json()
+    try:
+        settings = save_ai_settings(
+            body.get("provider", ""), body.get("model", ""), body.get("base_url", ""),
+            api_key=body.get("api_key"), clear_key=bool(body.get("clear_key")),
+        )
+        return {"ok": True, "settings": settings}
+    except (ValueError, RuntimeError) as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
+@app.post("/api/ai-settings/test")
+async def api_test_ai_settings():
+    try:
+        test_image = os.path.join(os.path.dirname(__file__), "static", "icons", "com.tencent.mm.png")
+        test_ai_connection(test_image)
+        return {"ok": True}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+
 @app.get("/api/projects")
 async def api_list_projects():
     """List all projects."""
@@ -891,6 +939,9 @@ async def api_create_project(req: Request):
         "description": description,
         "screenshots": {},
         "analysis": None,
+        "analysis_brief": None,
+        "analysis_status": {"state": "draft", "processed": 0, "total": 0},
+        "analysis_runs": [],
         "created_at": datetime.now().isoformat(),
     }
     save_projects(projects)
@@ -906,12 +957,14 @@ async def api_update_project(pid: str, req: Request):
 
     body = await req.json()
     proj = projects[pid]
+    screenshots_changed = False
 
     if "name" in body:
         proj["name"] = body["name"].strip()
     if "description" in body:
         proj["description"] = body["description"].strip()
     if "add_screenshots" in body:
+        screenshots_changed = True
         for item in body["add_screenshots"]:
             sid = item["id"]
             proj["screenshots"][sid] = {
@@ -919,6 +972,7 @@ async def api_update_project(pid: str, req: Request):
                 "added_at": datetime.now().isoformat(),
             }
     if "remove_screenshots" in body:
+        screenshots_changed = True
         for sid in body["remove_screenshots"]:
             proj["screenshots"].pop(sid, None)
     if "update_modules" in body:
@@ -926,6 +980,12 @@ async def api_update_project(pid: str, req: Request):
             sid = item["id"]
             if sid in proj["screenshots"]:
                 proj["screenshots"][sid]["module"] = item.get("module", "")
+
+    if screenshots_changed and proj.get("analysis"):
+        proj["analysis_status"] = {
+            "state": "stale", "processed": 0, "total": len(proj["screenshots"]),
+            "updated_at": datetime.now().isoformat(),
+        }
 
     save_projects(projects)
     return {"ok": True, "project": proj}
@@ -943,68 +1003,196 @@ async def api_delete_project(pid: str):
     return {"ok": True}
 
 
-@app.post("/api/projects/{pid}/analyze")
-async def api_analyze_project(pid: str):
-    """Run cross-platform competitive analysis on all screenshots in a project."""
-    try:
-        _require_key()
-    except ValueError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-
+@app.post("/api/projects/{pid}/dimensions")
+async def api_suggest_project_dimensions(pid: str, req: Request):
+    """Turn the required research question into dimensions for user confirmation."""
     projects = load_projects()
     if pid not in projects:
         return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=404)
-
-    proj = projects[pid]
-    if not proj["screenshots"]:
+    project = projects[pid]
+    body = await req.json()
+    question = (body.get("question") or "").strip()
+    context = (body.get("context") or "").strip()
+    if len(question) < 4:
+        return JSONResponse({"ok": False, "error": "请写下一个更具体的分析问题"}, status_code=400)
+    if not project.get("screenshots"):
         return JSONResponse({"ok": False, "error": "项目中没有截图"}, status_code=400)
-
-    # Find all screenshot files
-    image_paths = []
-    for sid in proj["screenshots"]:
-        found = None
-        for root, _, files in os.walk(SCREENSHOTS_DIR):
-            for f in files:
-                if os.path.splitext(f)[0] == sid:
-                    found = os.path.join(root, f)
-                    break
-            if found:
-                break
-        if found:
-            image_paths.append(found)
-        else:
-            print(f"  ⚠ 截图未找到: {sid}")
-
-    if not image_paths:
-        return JSONResponse({"ok": False, "error": "未找到任何截图文件"}, status_code=400)
-
-    print(f"  🔍 项目分析中: {proj['name']} ({len(image_paths)} 张截图)...")
-
     try:
-        result = analyze_project(image_paths, proj["name"])
-        proj["analysis"] = result
+        settings = _require_key()
+        metadata = load_screenshot_metadata()
+        apps = sorted({metadata.get(sid, {}).get("app") for sid in project["screenshots"]
+                       if metadata.get(sid, {}).get("app")})
+        framework = suggest_dimensions(project["name"], question, context, apps, settings)
+        brief = {"question": question, "context": context, "framework": framework,
+                 "confirmed": False, "updated_at": datetime.now().isoformat()}
+        project["analysis_brief"] = brief
+        project["analysis_status"] = {"state": "dimensions_ready", "processed": 0,
+                                      "total": len(project["screenshots"])}
         save_projects(projects)
+        return {"ok": True, "brief": brief}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
-        # Write screenshot_tags back to individual screenshot analysis
-        tags = result.get("screenshot_tags", {})
-        if tags:
-            analysis = load_analysis()
-            # Map filename → sid
-            path_to_sid = {os.path.basename(p): os.path.splitext(os.path.basename(p))[0] for p in image_paths}
-            for filename, touchpoint in tags.items():
-                sid = path_to_sid.get(filename)
-                if sid:
-                    existing = analysis.get(sid, {})
-                    existing["page_type"] = touchpoint
-                    existing["source"] = "project_analysis"
-                    analysis[sid] = existing
-            save_analysis(analysis)
 
-        print(f"  ✓ 项目分析完成: {proj['name']}")
-        return {"ok": True, "analysis": result}
-    except Exception as e:
-        print(f"  ✗ 项目分析失败: {e}")
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+def _set_analysis_status(pid, **values):
+    def apply(project):
+        project.setdefault("analysis_status", {}).update(values)
+        project["analysis_status"]["updated_at"] = datetime.now().isoformat()
+    update_project_record(pid, apply)
+
+
+def _fact_signature(path, question, dimensions, settings):
+    raw = json.dumps({"question": question, "dimensions": dimensions,
+                      "mtime": os.path.getmtime(path), "provider": settings["provider"],
+                      "model": settings["model"]}, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _sanitize_result_evidence(result, valid_ids):
+    """Prevent model-generated evidence links from pointing at unknown screenshots."""
+    def clean(item):
+        item["evidence_ids"] = [sid for sid in item.get("evidence_ids", []) if sid in valid_ids]
+    for row in result.get("comparison_board", []):
+        for item in row.get("apps", []):
+            clean(item)
+    for item in result.get("key_findings", []):
+        clean(item)
+    for item in result.get("report", {}).get("recommendations", []):
+        clean(item)
+    return result
+
+
+def _run_project_analysis(pid, run_id, brief, settings):
+    try:
+        project = load_projects().get(pid)
+        if not project:
+            return
+        metadata = load_screenshot_metadata()
+        indexed = load_analysis()
+        dimensions = brief["framework"]["dimensions"]
+        project_ids = list(project.get("screenshots", {}))
+        requested_order = brief.get("screenshot_order") or project_ids
+        ordered_ids = [sid for sid in requested_order if sid in project.get("screenshots", {})]
+        ordered_ids.extend(sid for sid in project_ids if sid not in ordered_ids)
+        items = [(sid, _find_screenshot_path(sid)) for sid in ordered_ids]
+        items = [(sid, path) for sid, path in items if path]
+        if not items:
+            raise ValueError("未找到任何截图文件")
+        _set_analysis_status(pid, state="analyzing", phase="evidence", processed=0,
+                             total=len(items), failed=0, error=None, run_id=run_id)
+        facts, failures = [], []
+        cache = project.get("fact_cache", {})
+        for index, (sid, path) in enumerate(items, 1):
+            signature = _fact_signature(path, brief["question"], dimensions, settings)
+            cached = cache.get(sid, {})
+            try:
+                if cached.get("signature") == signature and cached.get("fact"):
+                    fact = cached["fact"]
+                else:
+                    fact = analyze_screenshot_evidence(
+                        path, sid, metadata.get(sid, {}).get("app", ""), brief["question"],
+                        dimensions, indexed.get(sid, {}).get("ocr_text", ""), settings,
+                    )
+                    fact["screenshot_id"] = sid
+                    fact["app"] = metadata.get(sid, {}).get("app") or "未归类"
+                    allowed_dimensions = {item.get("id") for item in dimensions}
+                    fact["evidence"] = [item for item in fact.get("evidence", [])
+                                        if item.get("dimension_id") in allowed_dimensions]
+                    cache[sid] = {"signature": signature, "fact": fact,
+                                  "analyzed_at": datetime.now().isoformat()}
+                fact["sequence_index"] = index
+                facts.append(fact)
+            except Exception as exc:
+                failures.append({"screenshot_id": sid, "error": str(exc)})
+
+            def save_progress(current, processed=index):
+                current["fact_cache"] = cache
+                current.setdefault("analysis_status", {}).update({
+                    "state": "analyzing", "phase": "evidence", "processed": processed,
+                    "total": len(items), "failed": len(failures), "run_id": run_id,
+                    "updated_at": datetime.now().isoformat(),
+                })
+            update_project_record(pid, save_progress)
+
+        if not facts:
+            raise ValueError("所有截图都分析失败，请检查模型是否支持图片输入")
+        _set_analysis_status(pid, state="analyzing", phase="synthesis", processed=len(items),
+                             failed=len(failures))
+        result = synthesize_project(project["name"], brief["question"], brief.get("context", ""),
+                                    brief["framework"], facts, settings)
+        result = _sanitize_result_evidence(result, {item["screenshot_id"] for item in facts})
+        completed_at = datetime.now().isoformat()
+        result["meta"] = {"run_id": run_id, "provider": settings["provider"],
+                          "model": settings["model"], "completed_at": completed_at,
+                          "analyzed_count": len(facts), "failed_items": failures}
+        result["facts"] = facts
+
+        def finish(current):
+            current["analysis"] = result
+            current["analysis_brief"] = {**brief, "confirmed": True}
+            runs = current.setdefault("analysis_runs", [])
+            runs.insert(0, {"run_id": run_id, "completed_at": completed_at,
+                            "question": brief["question"], "provider": settings["provider"],
+                            "model": settings["model"], "analysis": result})
+            current["analysis_runs"] = runs[:5]
+            current["analysis_status"] = {
+                "state": "complete", "phase": "complete", "processed": len(items),
+                "total": len(items), "failed": len(failures), "run_id": run_id,
+                "updated_at": datetime.now().isoformat(),
+            }
+        update_project_record(pid, finish)
+    except Exception as exc:
+        print(f"  ✗ 项目分析失败: {exc}")
+        _set_analysis_status(pid, state="failed", phase="failed", error=str(exc), run_id=run_id)
+
+
+@app.post("/api/projects/{pid}/analyze")
+async def api_analyze_project(pid: str, req: Request, background_tasks: BackgroundTasks):
+    """Start evidence extraction and synthesis after dimensions are confirmed."""
+    projects = load_projects()
+    if pid not in projects:
+        return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=404)
+    project = projects[pid]
+    body = await req.json()
+    brief = project.get("analysis_brief") or {}
+    question = (body.get("question") or brief.get("question") or "").strip()
+    context = (body.get("context") or brief.get("context") or "").strip()
+    dimensions = body.get("dimensions") or brief.get("framework", {}).get("dimensions", [])
+    screenshot_order = body.get("screenshot_order") or list(project.get("screenshots", {}))
+    if len(question) < 4:
+        return JSONResponse({"ok": False, "error": "分析问题为必填项"}, status_code=400)
+    if not 1 <= len(dimensions) <= 8:
+        return JSONResponse({"ok": False, "error": "请保留 1-8 个分析维度"}, status_code=400)
+    project_ids = set(project.get("screenshots", {}))
+    if set(screenshot_order) != project_ids or len(screenshot_order) != len(project_ids):
+        return JSONResponse({"ok": False, "error": "截图顺序与项目内容不一致，请刷新后重试"}, status_code=400)
+    if project.get("analysis_status", {}).get("state") == "analyzing":
+        return JSONResponse({"ok": False, "error": "项目正在分析中"}, status_code=409)
+    try:
+        settings = _require_key()
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    framework = dict(brief.get("framework") or {})
+    framework["dimensions"] = dimensions
+    confirmed = {"question": question, "context": context, "framework": framework,
+                 "screenshot_order": screenshot_order,
+                 "confirmed": True, "updated_at": datetime.now().isoformat()}
+    run_id = f"run_{uuid.uuid4().hex[:8]}"
+    project["analysis_brief"] = confirmed
+    project["analysis_status"] = {"state": "queued", "phase": "queued", "processed": 0,
+                                  "total": len(project.get("screenshots", {})), "run_id": run_id}
+    save_projects(projects)
+    background_tasks.add_task(_run_project_analysis, pid, run_id, confirmed, settings)
+    return {"ok": True, "run_id": run_id}
+
+
+@app.get("/api/projects/{pid}/analysis-status")
+async def api_project_analysis_status(pid: str):
+    project = load_projects().get(pid)
+    if not project:
+        return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=404)
+    return {"ok": True, "status": project.get("analysis_status", {"state": "draft"}),
+            "has_analysis": bool(project.get("analysis"))}
 
 
 # ── API: Favorites & Notes ───────────────────────────────────────────

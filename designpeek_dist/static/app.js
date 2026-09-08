@@ -103,6 +103,12 @@ let state = {
   autoRefreshTimer: null,
   lasso: null,
   suppressNextCardClick: false,
+  editingAnalysisBrief: false,
+  analysisPollTimer: null,
+  aiSettings: null,
+  draftDimensions: [],
+  draftScreenshotOrder: [],
+  sequenceDragIndex: null,
 };
 
 // ── Init ─────────────────────────────────────────────────
@@ -319,6 +325,7 @@ function selectProject(pid) {
   state.currentProject = proj;
   state.batchMode = false;
   state.manageMode = false;
+  state.editingAnalysisBrief = false;
 
   document.querySelectorAll('#projectStatusFilters .filter-item').forEach(el => el.classList.remove('active'));
   renderProjectNav();
@@ -1173,9 +1180,19 @@ function hideImportProject() {
 async function confirmImportProject() {
   if (!state.importTargetPid || !state.selected.size) return;
   const count = state.selected.size;
+  const targetPid = state.importTargetPid;
   hideImportProject();
-  if (await _doImportToProject(state.importTargetPid)) {
+  if (await _doImportToProject(targetPid)) {
     showToast(`已加入分析项目 ${count} 张`);
+    state.currentTab = 'projects';
+    sessionStorage.setItem('dp_tab', 'projects');
+    document.querySelectorAll('.tab-nav-item').forEach(el => el.classList.toggle('active', el.dataset.tab === 'projects'));
+    document.getElementById('tabSidebarScreenshots').classList.remove('active');
+    document.getElementById('tabSidebarProjects').classList.add('active');
+    document.getElementById('viewScreenshots').classList.remove('active');
+    document.getElementById('viewProject').classList.add('active');
+    document.getElementById('sidebarUploadArea').style.display = 'none';
+    selectProject(targetPid);
   }
 }
 
@@ -1414,58 +1431,298 @@ function renderProjectDetail() {
   const proj = state.currentProject;
   if (!proj) return;
   const el = document.getElementById('projectContent');
-  const screenshots = proj.screenshots || {};
-  const ids = Object.keys(screenshots);
-  const ssMap = getSsMap();
-
-  let ssHtml = '';
-  if (ids.length === 0) {
-    ssHtml = `<div class="empty-state-inline">还没有添加截图，点击上方「+ 添加截图」按钮</div>`;
-  } else {
-    ssHtml = `<div class="project-screenshot-grid">` + ids.map(sid => {
-      const ss = ssMap[sid];
-      const thumb = ss ? `/screenshots/${ss.path}` : '';
-      const appName = ss?.app || '未归类';
-      const aiTag = (ss?.analysis && ss.analysis.page_type && ss.analysis.page_type !== '其他') ? ss.analysis.page_type : '';
-      return `
-      <div class="project-ss-item">
-        ${thumb ? `<img src="${thumb}" loading="lazy" alt="">` : `<div class="no-thumb">?</div>`}
-        <div class="project-ss-meta">
-          <span class="project-ss-app">${appIcon(appName)}${escapeHtml(appName)}</span>
-          ${aiTag ? `<span class="project-ss-module">${escapeHtml(aiTag)}</span>` : ''}
-        </div>
-        <button class="btn-remove-ss" onclick="event.stopPropagation(); removeScreenshotFromProject('${sid}')" title="移除">✕</button>
-      </div>`;
-    }).join('') + `</div>`;
-  }
+  const ids = Object.keys(proj.screenshots || {});
+  const ssHtml = renderProjectScreenshotGrid(proj, true);
 
   document.getElementById('projectToolbar').style.display = '';
   document.getElementById('btnAnalyzeProject').disabled = ids.length === 0;
+  const isNewAnalysis = !!proj.analysis?.comparison_board;
+  const legacyBoard = proj.analysis && !isNewAnalysis ? renderComparisonBoard(proj) : '';
+  const hasResult = !!proj.analysis;
+  const status = proj.analysis_status || { state: 'draft' };
 
-  const boardHtml = proj.analysis ? renderComparisonBoard(proj) : '';
-
-  const analysisHtml = proj.analysis ? renderProjectAnalysis(proj.analysis, !!boardHtml) : '';
-
-  if (state.manageMode && boardHtml) {
-    // Manage mode: only show screenshot grid
+  if (state.manageMode) {
     el.innerHTML = `
       ${proj.description ? `<div class="project-desc">${escapeHtml(proj.description)}</div>` : ''}
       <div class="section-title" style="margin-top:8px;">管理项目截图 (${ids.length})</div>
-      ${ssHtml || '<div class="empty-state-inline">还没有添加截图，点击上方「+ 添加截图」按钮</div>'}
+      ${ssHtml}
     `;
+  } else if (status.state === 'queued' || status.state === 'analyzing') {
+    el.innerHTML = renderAnalysisProgress(proj);
+    startAnalysisPolling(proj.id);
+  } else if (state.editingAnalysisBrief || !hasResult && status.state !== 'dimensions_ready') {
+    el.innerHTML = renderAnalysisPreparation(proj, ssHtml);
+  } else if (status.state === 'dimensions_ready') {
+    state.draftDimensions = JSON.parse(JSON.stringify(proj.analysis_brief?.framework?.dimensions || []));
+    state.draftScreenshotOrder = [...(proj.analysis_brief?.screenshot_order || Object.keys(proj.screenshots || {}))];
+    el.innerHTML = renderDimensionConfirmation(proj);
+  } else if (isNewAnalysis) {
+    el.innerHTML = renderEvidenceAnalysis(proj);
   } else {
     el.innerHTML = `
       ${proj.description ? `<div class="project-desc">${escapeHtml(proj.description)}</div>` : ''}
-      ${boardHtml}
-      ${analysisHtml}
+      ${legacyBoard}
+      ${renderProjectAnalysis(proj.analysis, !!legacyBoard)}
     `;
   }
 
-  document.getElementById('btnManageScreenshots').style.display = boardHtml ? '' : 'none';
+  document.getElementById('btnManageScreenshots').style.display = ids.length ? '' : 'none';
   document.getElementById('btnManageScreenshots').textContent = state.manageMode ? '← 返回看板' : '管理截图';
-  document.getElementById('btnAddScreenshots').style.display = state.manageMode ? '' : (boardHtml ? 'none' : '');
+  document.getElementById('btnAddScreenshots').style.display = state.manageMode || !hasResult ? '' : 'none';
   document.getElementById('btnAnalyzeProject').style.display = state.manageMode ? 'none' : '';
+  document.getElementById('btnAnalyzeProject').textContent = hasResult ? '重新分析' : '准备分析';
   document.getElementById('btnDeleteProject').style.display = state.manageMode ? 'none' : '';
+}
+
+function renderProjectScreenshotGrid(proj, removable = false, compact = false) {
+  const ids = Object.keys(proj.screenshots || {});
+  if (!ids.length) return '<div class="empty-state-inline">还没有添加截图，点击上方「+ 添加截图」</div>';
+  const ssMap = getSsMap();
+  return `<div class="project-screenshot-grid ${compact ? 'compact' : ''}">` + ids.map(sid => {
+    const ss = ssMap[sid];
+    const appName = ss?.app || '未归类';
+    return `<div class="project-ss-item" onclick="openProjectLightbox('${sid}')">
+      ${ss ? `<img src="/screenshots/${ss.path}" loading="lazy" alt="${escapeHtml(appName)}">` : '<div class="no-thumb">?</div>'}
+      <div class="project-ss-meta"><span class="project-ss-app">${appIcon(appName)}${escapeHtml(appName)}</span></div>
+      ${removable ? `<button class="btn-remove-ss" onclick="event.stopPropagation();removeScreenshotFromProject('${sid}')" title="移除">✕</button>` : ''}
+    </div>`;
+  }).join('') + '</div>';
+}
+
+function renderAnalysisPreparation(proj, ssHtml) {
+  const brief = proj.analysis_brief || {};
+  const statusError = proj.analysis_status?.state === 'failed' ? proj.analysis_status.error : '';
+  return `<div class="analysis-workbench">
+    <section class="analysis-brief-panel" id="analysisBriefPanel">
+      <div class="workbench-step"><span>1</span><div><strong>定义分析问题</strong><p>问题越具体，对比结果越可用。</p></div></div>
+      <label for="analysisQuestion">想从这些截图中了解什么 <em>必填</em></label>
+      <textarea id="analysisQuestion" rows="3" placeholder="例如：各 App 如何在商品详情页突出优惠并引导下单？">${escapeHtml(brief.question || '')}</textarea>
+      <div class="question-presets">
+        <button onclick="useQuestionPreset('对比各 App 在这个模块中的信息层级和操作引导')">模块对比</button>
+        <button onclick="useQuestionPreset('对比各 App 整个页面的视觉风格、布局和品牌表达')">视觉风格</button>
+        <button onclick="useQuestionPreset('对比各 App 完成目标任务的步骤、入口、反馈和可能阻力')">操作动线</button>
+      </div>
+      <label for="analysisContext">使用场景 <span>选填</span></label>
+      <input id="analysisContext" type="text" value="${escapeHtml(brief.context || '')}" placeholder="例如：用于新版商详页改版讨论">
+      ${statusError ? `<div class="analysis-inline-error">${escapeHtml(statusError)}</div>` : ''}
+      <div class="brief-actions"><span>${Object.keys(proj.screenshots || {}).length} 张截图将作为分析证据</span><button class="btn btn-primary" onclick="generateAnalysisDimensions()">生成分析维度</button></div>
+    </section>
+    <section class="project-evidence-section"><div class="workbench-section-head"><strong>项目截图</strong><span>点击查看原图</span></div>${ssHtml}</section>
+  </div>`;
+}
+
+function renderDimensionConfirmation(proj) {
+  const brief = proj.analysis_brief || {};
+  const framework = brief.framework || {};
+  const dimensions = state.draftDimensions;
+  return `<div class="analysis-workbench">
+    <section class="dimension-panel">
+      <div class="workbench-step"><span>2</span><div><strong>确认分析维度</strong><p>可编辑、删除或新增，确认后才会正式读取截图。</p></div></div>
+      <div class="brief-summary"><span>研究问题</span><strong>${escapeHtml(brief.question || '')}</strong></div>
+      <div class="method-line"><span>分析类型：${escapeHtml(framework.analysis_type || '综合分析')}</span>${(framework.methods || []).map(m => `<b>${escapeHtml(m)}</b>`).join('')}</div>
+      <div class="dimension-list" id="dimensionList">${dimensions.map((d, i) => renderDimensionRow(d, i)).join('')}</div>
+      <button class="btn btn-secondary btn-sm" onclick="addAnalysisDimension()">+ 新增维度</button>
+      ${renderScreenshotOrderEditor(proj)}
+      ${framework.limitations ? `<p class="method-limit"><strong>分析边界：</strong>${escapeHtml(framework.limitations)}</p>` : ''}
+      <div class="dimension-actions"><button class="btn btn-secondary" onclick="editAnalysisQuestion()">返回修改问题</button><button class="btn btn-primary" onclick="analyzeProject()">确认维度并开始分析</button></div>
+    </section>
+  </div>`;
+}
+
+function renderScreenshotOrderEditor(proj) {
+  const ssMap = getSsMap();
+  const items = renderScreenshotOrderItems(ssMap);
+  return `<div class="sequence-editor"><div class="sequence-heading"><strong>确认截图顺序</strong><span>拖动调整；动线分析会按此顺序识别步骤</span></div><div class="sequence-list" id="sequenceList">${items}</div></div>`;
+}
+
+function renderScreenshotOrderItems(ssMap = getSsMap()) {
+  return state.draftScreenshotOrder.map((sid, index) => {
+    const ss = ssMap[sid];
+    if (!ss) return '';
+    const app = ss.app || '未归类';
+    return `<div class="sequence-item" draggable="true" ondragstart="startSequenceDrag(event, ${index})" ondragover="event.preventDefault()" ondrop="dropSequenceItem(event, ${index})" ondragend="endSequenceDrag()"><span class="sequence-index">${index + 1}</span><img src="/screenshots/${ss.path}" alt=""><div><strong>${appIcon(app)}${escapeHtml(app)}</strong><small>第 ${index + 1} 步证据</small></div><div class="sequence-actions"><button onclick="event.stopPropagation();moveAnalysisScreenshot(${index}, -1)" ${index === 0 ? 'disabled' : ''} title="上移">↑</button><button onclick="event.stopPropagation();moveAnalysisScreenshot(${index}, 1)" ${index === state.draftScreenshotOrder.length - 1 ? 'disabled' : ''} title="下移">↓</button></div></div>`;
+  }).join('');
+}
+
+function startSequenceDrag(event, index) {
+  state.sequenceDragIndex = index;
+  event.dataTransfer.effectAllowed = 'move';
+  event.currentTarget.classList.add('dragging');
+}
+
+function dropSequenceItem(event, targetIndex) {
+  event.preventDefault();
+  const sourceIndex = state.sequenceDragIndex;
+  if (sourceIndex === null || sourceIndex === targetIndex) return;
+  const [sid] = state.draftScreenshotOrder.splice(sourceIndex, 1);
+  state.draftScreenshotOrder.splice(targetIndex, 0, sid);
+  state.sequenceDragIndex = null;
+  document.getElementById('sequenceList').innerHTML = renderScreenshotOrderItems();
+}
+
+function endSequenceDrag() {
+  state.sequenceDragIndex = null;
+  document.querySelectorAll('.sequence-item.dragging').forEach(item => item.classList.remove('dragging'));
+}
+
+function moveAnalysisScreenshot(index, offset) {
+  const target = index + offset;
+  if (target < 0 || target >= state.draftScreenshotOrder.length) return;
+  [state.draftScreenshotOrder[index], state.draftScreenshotOrder[target]] = [state.draftScreenshotOrder[target], state.draftScreenshotOrder[index]];
+  document.getElementById('sequenceList').innerHTML = renderScreenshotOrderItems();
+}
+
+function renderDimensionRow(d, index) {
+  return `<div class="dimension-row" data-index="${index}"><span class="dimension-number">${index + 1}</span><div><input class="dimension-name" value="${escapeHtml(d.name || '')}" aria-label="维度名称"><input class="dimension-focus" value="${escapeHtml(d.focus || '')}" aria-label="观察重点"></div><button class="dimension-delete" onclick="removeAnalysisDimension(${index})" title="删除维度">✕</button></div>`;
+}
+
+function renderAnalysisProgress(proj) {
+  const status = proj.analysis_status || {};
+  const total = status.total || Object.keys(proj.screenshots || {}).length;
+  const processed = status.processed || 0;
+  const percent = total ? Math.round(processed / total * 100) : 0;
+  const phaseText = status.phase === 'synthesis' ? '正在汇总对比结论' : '正在逐张提取图片证据';
+  return `<div class="analysis-progress-panel"><div class="analysis-progress-mark"></div><h2>${phaseText}</h2><p>${status.phase === 'synthesis' ? '图片证据已整理完成，正在按确认的维度生成看板。' : `已处理 ${processed} / ${total} 张，可以留在此页查看进度。`}</p><div class="analysis-progress-track"><span style="width:${status.phase === 'synthesis' ? 100 : percent}%"></span></div>${status.failed ? `<small>${status.failed} 张暂未成功，其余截图会继续分析</small>` : ''}</div>`;
+}
+
+function renderEvidenceThumbs(ids) {
+  const ssMap = getSsMap();
+  return (ids || []).map(id => {
+    const ss = ssMap[id];
+    return ss ? `<button class="evidence-thumb" onclick="openProjectLightbox('${id}')" title="查看证据"><img src="/screenshots/${ss.path}" alt=""><span>${escapeHtml(ss.app || '未归类')}</span></button>` : '';
+  }).join('');
+}
+
+function confidenceLabel(value) {
+  return { high: '高置信', medium: '中置信', low: '低置信' }[value] || '未标注';
+}
+
+function renderEvidenceAnalysis(proj) {
+  const analysis = proj.analysis || {};
+  const brief = proj.analysis_brief || {};
+  const framework = brief.framework || {};
+  const board = analysis.comparison_board || [];
+  const meta = analysis.meta || {};
+  const appNames = [...new Set(board.flatMap(row => (row.apps || []).map(item => item.app)))];
+  const boardRows = board.map(row => {
+    const appMap = Object.fromEntries((row.apps || []).map(item => [item.app, item]));
+    return `<div class="evidence-board-row">
+      <div class="evidence-dimension"><strong>${escapeHtml(row.dimension_name || '')}</strong><p>${escapeHtml(row.comparison || '')}</p>${row.opportunity ? `<div class="dimension-opportunity"><span>机会点</span>${escapeHtml(row.opportunity)}</div>` : ''}</div>
+      <div class="evidence-app-grid" style="--app-columns:${Math.max(appNames.length, 1)}">${appNames.map(app => {
+        const item = appMap[app];
+        if (!item) return `<div class="evidence-app-cell empty-cell"><strong>${appIcon(app)}${escapeHtml(app)}</strong><span>暂无证据</span></div>`;
+        return `<div class="evidence-app-cell"><div class="evidence-cell-head"><strong>${appIcon(app)}${escapeHtml(app)}</strong><span class="confidence ${escapeHtml(item.confidence || '')}">${confidenceLabel(item.confidence)}</span></div><p>${escapeHtml(item.finding || '')}</p>${(item.strengths || []).map(v => `<div class="evidence-point positive">${escapeHtml(v)}</div>`).join('')}${(item.risks || []).map(v => `<div class="evidence-point risk">${escapeHtml(v)}</div>`).join('')}<div class="evidence-thumbs">${renderEvidenceThumbs(item.evidence_ids)}</div></div>`;
+      }).join('')}</div>
+    </div>`;
+  }).join('');
+
+  const findings = (analysis.key_findings || []).map((item, index) => `<article class="finding-item"><span class="finding-index">${String(index + 1).padStart(2, '0')}</span><div class="finding-body"><div class="finding-title-line"><h3>${escapeHtml(item.title || '')}</h3><span class="confidence ${escapeHtml(item.confidence || '')}">${confidenceLabel(item.confidence)}</span></div><p><strong>观察</strong>${escapeHtml(item.observation || '')}</p><p><strong>意义</strong>${escapeHtml(item.implication || '')}</p><div class="finding-recommendation"><strong>建议</strong>${escapeHtml(item.recommendation || '')}</div><div class="evidence-thumbs">${renderEvidenceThumbs(item.evidence_ids)}</div></div></article>`).join('');
+  const report = analysis.report || {};
+  const recommendations = (report.recommendations || []).map(item => `<div class="report-action"><span class="priority ${escapeHtml(item.priority || '')}">${item.priority === 'high' ? '高' : item.priority === 'medium' ? '中' : '低'}</span><div><strong>${escapeHtml(item.action || '')}</strong><p>${escapeHtml(item.reason || '')}</p><div class="evidence-thumbs">${renderEvidenceThumbs(item.evidence_ids)}</div></div></div>`).join('');
+  const measurements = (report.measurement_hypotheses || []).map(item => `<tr><td>${escapeHtml(item.goal || '')}</td><td>${escapeHtml(item.signal || '')}</td><td>${escapeHtml(item.metric || '')}</td></tr>`).join('');
+
+  return `<div class="analysis-results">
+    ${proj.analysis_status?.state === 'stale' ? '<div class="stale-analysis-notice">项目截图已变更，当前结果仍为上一版。点击右上角「重新分析」更新。</div>' : ''}
+    <header class="analysis-result-header"><div><span class="result-kicker">研究问题</span><h2>${escapeHtml(brief.question || '')}</h2><p>${escapeHtml(analysis.answer || '')}</p></div><div class="result-meta"><span>${meta.analyzed_count || Object.keys(proj.screenshots || {}).length} 张证据</span><span>${escapeHtml(meta.provider || '')} / ${escapeHtml(meta.model || '')}</span></div></header>
+    <div class="method-line result-methods"><span>${escapeHtml(framework.analysis_type || '综合分析')}</span>${(framework.methods || []).map(m => `<b>${escapeHtml(m)}</b>`).join('')}</div>
+    <section class="evidence-board"><div class="workbench-section-head"><strong>图片证据对比看板</strong><span>点击小图查看原始证据</span></div>${boardRows || '<div class="empty-state-inline">暂无可展示的对比维度</div>'}</section>
+    ${findings ? `<section class="findings-section"><div class="workbench-section-head"><strong>核心发现</strong><span>观察、意义和建议分开呈现</span></div>${findings}</section>` : ''}
+    <section class="supporting-report"><div class="workbench-section-head"><strong>辅助文字报告</strong></div><p class="report-summary">${escapeHtml(report.summary || '')}</p>${recommendations ? `<div class="report-actions">${recommendations}</div>` : ''}${measurements ? `<div class="measurement-wrap"><h3>待验证指标</h3><table><thead><tr><th>目标</th><th>信号</th><th>指标</th></tr></thead><tbody>${measurements}</tbody></table></div>` : ''}${report.limitations ? `<div class="report-limit"><strong>分析边界</strong>${escapeHtml(report.limitations)}</div>` : ''}</section>
+  </div>`;
+}
+
+function focusAnalysisBrief() {
+  state.editingAnalysisBrief = true;
+  renderProjectDetail();
+  requestAnimationFrame(() => document.getElementById('analysisQuestion')?.focus());
+}
+
+function useQuestionPreset(text) {
+  const input = document.getElementById('analysisQuestion');
+  if (input) { input.value = text; input.focus(); }
+}
+
+async function generateAnalysisDimensions() {
+  if (!state.currentProject) return;
+  const question = document.getElementById('analysisQuestion')?.value.trim() || '';
+  const context = document.getElementById('analysisContext')?.value.trim() || '';
+  if (question.length < 4) { showToast('请先写下一个具体的分析问题'); return; }
+  const button = document.querySelector('.brief-actions .btn-primary');
+  if (button) { button.disabled = true; button.textContent = '正在生成...'; }
+  try {
+    const res = await fetch(`/api/projects/${state.currentProject.id}/dimensions`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, context }) });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '生成失败');
+    await refreshCurrentProject();
+    state.editingAnalysisBrief = false;
+    renderProjectDetail();
+  } catch (error) {
+    showToast(error.message);
+    if (error.message.includes('API Key')) showAISettings();
+  } finally {
+    if (button) { button.disabled = false; button.textContent = '生成分析维度'; }
+  }
+}
+
+function collectDraftDimensions() {
+  return [...document.querySelectorAll('.dimension-row')].map((row, index) => ({ id: `dimension_${index + 1}`, name: row.querySelector('.dimension-name').value.trim(), focus: row.querySelector('.dimension-focus').value.trim() })).filter(d => d.name && d.focus);
+}
+
+function addAnalysisDimension() {
+  state.draftDimensions = collectDraftDimensions();
+  if (state.draftDimensions.length >= 8) { showToast('最多保留 8 个分析维度'); return; }
+  state.draftDimensions.push({ id: `dimension_${state.draftDimensions.length + 1}`, name: '新分析维度', focus: '填写需要观察的具体内容' });
+  document.getElementById('dimensionList').innerHTML = state.draftDimensions.map((d, i) => renderDimensionRow(d, i)).join('');
+}
+
+function removeAnalysisDimension(index) {
+  state.draftDimensions = collectDraftDimensions();
+  if (state.draftDimensions.length <= 1) { showToast('至少保留 1 个分析维度'); return; }
+  state.draftDimensions.splice(index, 1);
+  document.getElementById('dimensionList').innerHTML = state.draftDimensions.map((d, i) => renderDimensionRow(d, i)).join('');
+}
+
+function editAnalysisQuestion() {
+  state.editingAnalysisBrief = true;
+  renderProjectDetail();
+}
+
+async function refreshCurrentProject() {
+  const pid = state.currentProject?.id;
+  await loadProjects();
+  state.currentProject = state.projects.find(p => p.id === pid) || null;
+}
+
+function startAnalysisPolling(pid) {
+  clearInterval(state.analysisPollTimer);
+  state.analysisPollTimer = setInterval(async () => {
+    if (state.currentProject?.id !== pid) { clearInterval(state.analysisPollTimer); return; }
+    const res = await fetch(`/api/projects/${pid}/analysis-status`);
+    const data = await res.json();
+    if (!data.ok) return;
+    if (['complete', 'failed'].includes(data.status.state)) {
+      clearInterval(state.analysisPollTimer);
+      await refreshCurrentProject();
+      if (data.status.state === 'failed') state.editingAnalysisBrief = true;
+      renderProjectDetail();
+      showToast(data.status.state === 'complete' ? '分析完成' : `分析失败：${data.status.error || '未知错误'}`);
+    } else {
+      state.currentProject.analysis_status = data.status;
+      document.getElementById('projectContent').innerHTML = renderAnalysisProgress(state.currentProject);
+    }
+  }, 1500);
+}
+
+function openProjectLightbox(id) {
+  const ids = new Set(Object.keys(state.currentProject?.screenshots || {}));
+  const items = state.screenshots.filter(s => ids.has(s.id));
+  const index = items.findIndex(s => s.id === id);
+  if (index < 0) return;
+  state.lightboxItems = items;
+  state.lightboxIndex = index;
+  showLightboxImage();
+  document.getElementById('lightbox').style.display = 'flex';
+  document.body.style.overflow = 'hidden';
 }
 
 function toggleManageScreenshots() {
@@ -1777,6 +2034,117 @@ function renderProjectAnalysis(a, skipTags = false) {
 // ── Project Actions ───────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
 
+async function showAISettings() {
+  const modal = document.getElementById('aiSettingsModal');
+  const error = document.getElementById('aiSettingsError');
+  error.style.display = 'none';
+  modal.style.display = 'flex';
+  try {
+    const res = await fetch('/api/ai-settings');
+    state.aiSettings = await res.json();
+    const select = document.getElementById('aiProviderInput');
+    select.innerHTML = state.aiSettings.providers.map(p => `<option value="${p.id}">${escapeHtml(p.label)}</option>`).join('');
+    select.value = state.aiSettings.provider;
+    document.getElementById('aiModelInput').value = state.aiSettings.model || '';
+    document.getElementById('aiBaseUrlInput').value = state.aiSettings.base_url || '';
+    document.getElementById('aiKeyInput').value = '';
+    updateAIKeyStatus();
+    onAIProviderChange(false);
+  } catch (err) {
+    error.textContent = err.message;
+    error.style.display = '';
+  }
+}
+
+function hideAISettings() {
+  document.getElementById('aiSettingsModal').style.display = 'none';
+}
+
+function updateAIKeyStatus() {
+  const settings = state.aiSettings || {};
+  const el = document.getElementById('aiKeyStatus');
+  el.textContent = settings.key_configured ? `已配置 ${settings.key_preview || 'API Key'}${settings.key_source === 'env' ? '（来自 .env）' : '（Mac 钥匙串）'}` : '尚未配置 API Key';
+  el.classList.toggle('configured', !!settings.key_configured);
+  const clearButton = document.getElementById('btnClearAIKey');
+  clearButton.disabled = !settings.key_configured || settings.key_source === 'env';
+  clearButton.title = settings.key_source === 'env' ? '该 Key 来自 .env，需在配置文件中删除' : '';
+}
+
+function onAIProviderChange(resetModel = true) {
+  const provider = document.getElementById('aiProviderInput').value;
+  const info = state.aiSettings?.providers?.find(p => p.id === provider);
+  if (resetModel && info) document.getElementById('aiModelInput').value = info.default_model;
+  document.getElementById('aiBaseUrlInput').disabled = provider === 'gemini';
+  if (state.aiSettings && provider !== state.aiSettings.provider) {
+    const status = document.getElementById('aiKeyStatus');
+    status.textContent = '切换服务商后，请填写对应的 API Key';
+    status.classList.remove('configured');
+  }
+}
+
+async function saveAISettings(keepOpen = false) {
+  const error = document.getElementById('aiSettingsError');
+  error.style.display = 'none';
+  const payload = {
+    provider: document.getElementById('aiProviderInput').value,
+    model: document.getElementById('aiModelInput').value.trim(),
+    base_url: document.getElementById('aiBaseUrlInput').value.trim(),
+    api_key: document.getElementById('aiKeyInput').value.trim() || null,
+  };
+  if (!payload.model) { error.textContent = '请填写模型名称'; error.style.display = ''; return false; }
+  const button = document.getElementById('btnSaveAI');
+  button.disabled = true;
+  try {
+    const res = await fetch('/api/ai-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '保存失败');
+    state.aiSettings = { ...state.aiSettings, ...data.settings };
+    document.getElementById('aiKeyInput').value = '';
+    updateAIKeyStatus();
+    if (!keepOpen) { hideAISettings(); showToast('AI 设置已保存'); }
+    return true;
+  } catch (err) {
+    error.textContent = err.message;
+    error.style.display = '';
+    return false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testAISettings() {
+  const saved = await saveAISettings(true);
+  if (!saved) return;
+  const button = document.getElementById('btnTestAI');
+  const error = document.getElementById('aiSettingsError');
+  button.disabled = true; button.textContent = '测试中...';
+  try {
+    const res = await fetch('/api/ai-settings/test', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '连接失败');
+    showToast('连接成功，可以开始分析');
+  } catch (err) {
+    error.textContent = `连接失败：${err.message}`;
+    error.style.display = '';
+  } finally {
+    button.disabled = false; button.textContent = '测试连接';
+  }
+}
+
+async function clearAIKey() {
+  const provider = document.getElementById('aiProviderInput').value;
+  if (!confirm('确定删除这个服务商保存的 API Key？')) return;
+  const res = await fetch('/api/ai-settings', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider, model: document.getElementById('aiModelInput').value.trim(), base_url: document.getElementById('aiBaseUrlInput').value.trim(), clear_key: true }),
+  });
+  const data = await res.json();
+  if (!data.ok) { showToast(data.error || '删除失败'); return; }
+  state.aiSettings = { ...state.aiSettings, ...data.settings };
+  updateAIKeyStatus();
+  showToast('API Key 已删除');
+}
+
 function showCreateProject() {
   document.getElementById('projectNameInput').value = '';
   document.getElementById('projectDescInput').value = '';
@@ -1880,26 +2248,23 @@ async function removeScreenshotFromProject(sid) {
 async function analyzeProject() {
   if (!state.currentProject) return;
   const pid = state.currentProject.id;
-  const btn = document.getElementById('btnAnalyzeProject');
-  btn.disabled = true; btn.textContent = '分析中...';
-
-  // Show loading placeholder
-  const content = document.getElementById('projectContent');
-  const prevHtml = content.innerHTML;
-  content.innerHTML = '<div class="empty"><div class="empty-icon">🔍</div><p>正在分析截图，请稍候...</p></div>';
-
-  const res = await fetch(`/api/projects/${pid}/analyze`, { method: 'POST' });
-  const data = await res.json();
-  if (data.ok) {
-    await loadProjects();
-    state.currentProject = state.projects.find(p => p.id === pid);
-    renderProjectNav();
-    renderTouchpointConfirm();
-    showToast('分析完成，请确认模块分类');
-  } else {
-    btn.disabled = false; btn.textContent = '分析项目';
-    content.innerHTML = prevHtml;
-    showToast('分析失败: ' + (data.error || '未知错误'));
+  const dimensions = collectDraftDimensions();
+  if (!dimensions.length) { showToast('请至少保留一个完整的分析维度'); return; }
+  const brief = state.currentProject.analysis_brief || {};
+  const button = document.querySelector('.dimension-actions .btn-primary');
+  if (button) { button.disabled = true; button.textContent = '正在启动...'; }
+  try {
+    const res = await fetch(`/api/projects/${pid}/analyze`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: brief.question, context: brief.context, dimensions, screenshot_order: state.draftScreenshotOrder }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || '无法开始分析');
+    await refreshCurrentProject();
+    renderProjectDetail();
+  } catch (error) {
+    showToast(error.message);
+    if (button) { button.disabled = false; button.textContent = '确认维度并开始分析'; }
   }
 }
 
