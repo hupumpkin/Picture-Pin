@@ -59,11 +59,18 @@ def _parse_response(text):
 def _openai_chat(cfg, messages, max_tokens):
     from openai import OpenAI
     client = OpenAI(api_key=cfg["api_key"], base_url=cfg.get("base_url") or None)
-    extra = {"extra_body": {"enable_thinking": False}} if cfg["provider"] == "qwen" else {}
+    extra = {}
+    if cfg["provider"] == "qwen":
+        extra["extra_body"] = {"enable_thinking": False}
+    elif cfg["provider"] == "kimi":
+        extra["extra_body"] = {"thinking": {"type": "disabled"}}
     response = client.chat.completions.create(
         model=cfg["model"], max_tokens=max_tokens, messages=messages, **extra,
     )
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError("模型未返回最终内容，可能是思考过程用完了输出额度")
+    return content
 
 
 def _text_request(prompt, settings=None, max_tokens=4096):

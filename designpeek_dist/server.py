@@ -1104,18 +1104,21 @@ def _run_project_analysis(pid, run_id, brief, settings):
                 facts.append(fact)
             except Exception as exc:
                 failures.append({"screenshot_id": sid, "error": str(exc)})
+                print(f"  ✗ 截图分析失败 [{sid}]: {type(exc).__name__}: {exc}")
 
             def save_progress(current, processed=index):
                 current["fact_cache"] = cache
                 current.setdefault("analysis_status", {}).update({
                     "state": "analyzing", "phase": "evidence", "processed": processed,
                     "total": len(items), "failed": len(failures), "run_id": run_id,
+                    "failed_items": failures[-10:],
                     "updated_at": datetime.now().isoformat(),
                 })
             update_project_record(pid, save_progress)
 
         if not facts:
-            raise ValueError("所有截图都分析失败，请检查模型是否支持图片输入")
+            first_error = failures[0]["error"] if failures else "未知错误"
+            raise ValueError(f"所有截图都分析失败。首个错误：{first_error}")
         _set_analysis_status(pid, state="analyzing", phase="synthesis", processed=len(items),
                              failed=len(failures))
         result = synthesize_project(project["name"], brief["question"], brief.get("context", ""),
@@ -1143,7 +1146,8 @@ def _run_project_analysis(pid, run_id, brief, settings):
         update_project_record(pid, finish)
     except Exception as exc:
         print(f"  ✗ 项目分析失败: {exc}")
-        _set_analysis_status(pid, state="failed", phase="failed", error=str(exc), run_id=run_id)
+        _set_analysis_status(pid, state="failed", phase="failed", error=str(exc), run_id=run_id,
+                             failed_items=locals().get("failures", [])[-10:])
 
 
 @app.post("/api/projects/{pid}/analyze")
