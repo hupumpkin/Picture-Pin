@@ -1891,6 +1891,7 @@ body {
 
 .modal-intro { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin: -8px 0 14px; }
 .ai-key-status { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+.ai-provider-hint { font-size: 11px; color: var(--text-muted); line-height: 1.5; margin-top: 6px; }
 .ai-key-status.configured { color: #3e714a; }
 .modal select:disabled, .modal input:disabled { background: #f4f4f4; color: var(--text-muted); }
 

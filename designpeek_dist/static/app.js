@@ -2073,12 +2073,20 @@ function updateAIKeyStatus() {
 function onAIProviderChange(resetModel = true) {
   const provider = document.getElementById('aiProviderInput').value;
   const info = state.aiSettings?.providers?.find(p => p.id === provider);
-  if (resetModel && info) document.getElementById('aiModelInput').value = info.default_model;
+  if (resetModel && info) {
+    const returningToSaved = provider === state.aiSettings?.provider;
+    document.getElementById('aiModelInput').value = returningToSaved ? state.aiSettings.model : info.default_model;
+    document.getElementById('aiBaseUrlInput').value = returningToSaved ? state.aiSettings.base_url : (info.default_base_url || '');
+  }
+  document.getElementById('aiProviderHint').textContent = info?.hint || '';
   document.getElementById('aiBaseUrlInput').disabled = provider === 'gemini';
   if (state.aiSettings && provider !== state.aiSettings.provider) {
     const status = document.getElementById('aiKeyStatus');
     status.textContent = '切换服务商后，请填写对应的 API Key';
     status.classList.remove('configured');
+    document.getElementById('btnClearAIKey').disabled = true;
+  } else {
+    updateAIKeyStatus();
   }
 }
 

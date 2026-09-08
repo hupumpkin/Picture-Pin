@@ -7,6 +7,7 @@ import re
 
 from ai_settings import load_ai_settings
 
+OPENAI_COMPATIBLE_PROVIDERS = {"openai", "qwen", "deepseek", "kimi"}
 
 METHOD_LIBRARY = """
 只能从下列成熟方法中选择与问题相关的方法，不要自创方法名：
@@ -55,6 +56,16 @@ def _parse_response(text):
     raise ValueError("AI 未返回可读取的结构化结果，请重试或更换模型")
 
 
+def _openai_chat(cfg, messages, max_tokens):
+    from openai import OpenAI
+    client = OpenAI(api_key=cfg["api_key"], base_url=cfg.get("base_url") or None)
+    extra = {"extra_body": {"enable_thinking": False}} if cfg["provider"] == "qwen" else {}
+    response = client.chat.completions.create(
+        model=cfg["model"], max_tokens=max_tokens, messages=messages, **extra,
+    )
+    return response.choices[0].message.content
+
+
 def _text_request(prompt, settings=None, max_tokens=4096):
     cfg = _settings(settings)
     if cfg["provider"] == "gemini":
@@ -67,12 +78,8 @@ def _text_request(prompt, settings=None, max_tokens=4096):
         msg = client.messages.create(model=cfg["model"], max_tokens=max_tokens,
                                      messages=[{"role": "user", "content": prompt}])
         return msg.content[0].text
-    if cfg["provider"] == "openai":
-        from openai import OpenAI
-        client = OpenAI(api_key=cfg["api_key"], base_url=cfg.get("base_url") or None)
-        resp = client.chat.completions.create(model=cfg["model"], max_tokens=max_tokens,
-                                              messages=[{"role": "user", "content": prompt}])
-        return resp.choices[0].message.content
+    if cfg["provider"] in OPENAI_COMPATIBLE_PROVIDERS:
+        return _openai_chat(cfg, [{"role": "user", "content": prompt}], max_tokens)
     raise ValueError("不支持的 AI 服务商")
 
 
@@ -96,16 +103,12 @@ def _vision_request(image_path, prompt, settings=None, max_tokens=4096):
         msg = client.messages.create(model=cfg["model"], max_tokens=max_tokens,
                                      messages=[{"role": "user", "content": content}])
         return msg.content[0].text
-    if cfg["provider"] == "openai":
-        from openai import OpenAI
-        client = OpenAI(api_key=cfg["api_key"], base_url=cfg.get("base_url") or None)
+    if cfg["provider"] in OPENAI_COMPATIBLE_PROVIDERS:
         content = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:{_mime_for(image_path)};base64,{encoded}"}},
         ]
-        resp = client.chat.completions.create(model=cfg["model"], max_tokens=max_tokens,
-                                              messages=[{"role": "user", "content": content}])
-        return resp.choices[0].message.content
+        return _openai_chat(cfg, [{"role": "user", "content": content}], max_tokens)
     raise ValueError("不支持的 AI 服务商")
 
 
