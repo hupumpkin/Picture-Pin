@@ -1209,11 +1209,12 @@ async def api_toggle_favorite(req: Request):
     if not sid:
         return JSONResponse({"ok": False, "error": "缺少 id"}, status_code=400)
 
-    analysis = load_analysis()
-    entry = analysis.get(sid, {})
-    entry["favorite"] = not entry.get("favorite", False)
-    analysis[sid] = entry
-    save_analysis(analysis)
+    with _ANALYSIS_WRITE_LOCK:
+        analysis = load_analysis()
+        entry = analysis.get(sid, {})
+        entry["favorite"] = not entry.get("favorite", False)
+        analysis[sid] = entry
+        save_analysis(analysis)
     return {"ok": True, "id": sid, "favorite": entry["favorite"]}
 
 

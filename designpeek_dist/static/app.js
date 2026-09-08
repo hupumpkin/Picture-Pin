@@ -563,7 +563,7 @@ function highlightFilters() {
   else if (state.filter.app) parts.push(state.filter.app);
 
   if (!folder && state.filter.status !== 'all') {
-    const labels = { inbox: '新添加截图', organized: '已整理' };
+    const labels = { inbox: '新添加截图', organized: '已整理', favorites: '已收藏' };
     parts.push(labels[state.filter.status] || '');
   }
   document.getElementById('viewTitle').textContent = parts.length ? parts.join(' · ') : '截图';
@@ -2773,7 +2773,8 @@ function showLightboxImage() {
 
   // Fav button
   const favBtn = document.getElementById('lbFavBtn');
-  favBtn.textContent = isFav ? '👍🏻 已顶' : '👍🏻 顶呱呱';
+  favBtn.textContent = isFav ? '★ 取消收藏' : '☆ 收藏';
+  favBtn.setAttribute('aria-pressed', String(!!isFav));
   if (isFav) favBtn.classList.add('active');
   else favBtn.classList.remove('active');
   favBtn.dataset.sid = item.id;
@@ -2806,7 +2807,8 @@ async function toggleFavoriteFromBtn() {
   const data = await res.json();
   if (data.ok) {
     const isFav = data.favorite;
-    btn.textContent = isFav ? '👍🏻 已顶' : '👍🏻 顶呱呱';
+    btn.textContent = isFav ? '★ 取消收藏' : '☆ 收藏';
+    btn.setAttribute('aria-pressed', String(isFav));
     if (isFav) {
       btn.classList.add('active');
     } else {
@@ -2824,6 +2826,7 @@ async function toggleFavoriteFromBtn() {
       ss.analysis.favorite = isFav;
     }
     updateFavoritesCount();
+    if (state.currentTab === 'screenshots' && state.filter.status === 'favorites') renderGrid();
   }
 }
 
