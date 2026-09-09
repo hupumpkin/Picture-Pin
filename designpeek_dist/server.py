@@ -274,6 +274,50 @@ def all_conversations():
     return merged
 
 
+def migrate_legacy_analysis_projects():
+    """Split old analysis records from their containers without touching image files."""
+    with _PROJECTS_WRITE_LOCK, _CONVERSATIONS_WRITE_LOCK:
+        projects = load_projects()
+        conversations = load_conversations()
+        changed = False
+        for pid, project in projects.items():
+            if project.get("parent_id") is not None:
+                project["parent_id"] = None
+                changed = True
+            screenshot_ids = list(project.get("screenshots", {}))
+            if not screenshot_ids:
+                continue
+            cid = f"conv_migrated_{pid.removeprefix('proj_')}"
+            if cid not in conversations:
+                brief = project.get("analysis_brief") or {}
+                conversations[cid] = {
+                    "id": cid,
+                    "title": project.get("name") or "旧分析",
+                    "screenshot_ids": screenshot_ids,
+                    "project_id": pid,
+                    "question": brief.get("question", ""),
+                    "angle": "",
+                    "mode": "quick",
+                    "screenshot_order": screenshot_ids,
+                    "sort_order": None,
+                    "status": project.get("analysis_status") or {"state": "draft"},
+                    "result": project.get("analysis"),
+                    "runs": project.get("analysis_runs") or [],
+                    "created_at": project.get("created_at") or datetime.now().isoformat(),
+                    "updated_at": project.get("created_at") or datetime.now().isoformat(),
+                    "migrated_from": pid,
+                }
+            project["screenshots"] = {}
+            project["analysis"] = None
+            project["analysis_brief"] = None
+            project["analysis_status"] = {"state": "draft", "processed": 0, "total": 0}
+            project["analysis_runs"] = []
+            changed = True
+        if changed:
+            save_conversations(conversations)
+            save_projects(projects)
+
+
 def load_folders():
     with open(FOLDERS_FILE, "r") as f:
         return json.load(f)
@@ -451,6 +495,7 @@ def start_ocr_backfill():
 
 @app.on_event("startup")
 async def startup_ocr_index():
+    migrate_legacy_analysis_projects()
     start_ocr_backfill()
 
 
@@ -1027,7 +1072,7 @@ async def api_create_project(req: Request):
     description = body.get("description", "").strip()
 
     if not name:
-        return JSONResponse({"ok": False, "error": "项目名称不能为空"}, status_code=400)
+        return JSONResponse({"ok": False, "error": "文件夹名称不能为空"}, status_code=400)
 
     projects = load_projects()
     pid = f"proj_{uuid.uuid4().hex[:8]}"
@@ -1035,7 +1080,7 @@ async def api_create_project(req: Request):
         "id": pid,
         "name": name,
         "description": description,
-        "parent_id": body.get("parent_id"),
+        "parent_id": None,
         "screenshots": {},
         "analysis": None,
         "analysis_brief": None,
@@ -1459,8 +1504,11 @@ def _run_conversation_analysis(cid, run_id, question, angle, mode, ordered_ids, 
 @app.get("/api/conversations")
 async def api_list_conversations():
     return sorted(all_conversations().values(),
-                  key=lambda item: item.get("updated_at") or item.get("created_at") or "",
-                  reverse=True)
+                  key=lambda item: (
+                      item.get("sort_order") is None,
+                      -(item.get("sort_order") or 0),
+                      item.get("updated_at") or item.get("created_at") or "",
+                  ), reverse=True)
 
 
 @app.post("/api/conversations")
@@ -1475,7 +1523,7 @@ async def api_create_conversation(req: Request):
     cid = f"conv_{uuid.uuid4().hex[:10]}"
     conversation = {"id": cid, "title": "新分析", "screenshot_ids": ids,
                     "project_id": body.get("project_id"), "question": "", "angle": "",
-                    "mode": "quick", "screenshot_order": [],
+                    "mode": "quick", "screenshot_order": [], "sort_order": None,
                     "status": {"state": "draft", "processed": 0, "total": len(ids)},
                     "result": None, "runs": [], "created_at": now, "updated_at": now}
     conversations = load_conversations()
@@ -1499,8 +1547,13 @@ async def api_update_conversation(cid: str, req: Request):
     if "project_id" in body:
         project_id = body.get("project_id")
         if project_id and project_id not in load_projects():
-            return JSONResponse({"ok": False, "error": "项目不存在"}, status_code=400)
+            return JSONResponse({"ok": False, "error": "文件夹不存在"}, status_code=400)
         conversation["project_id"] = project_id
+    if "sort_order" in body:
+        sort_order = body.get("sort_order")
+        if sort_order is not None and not isinstance(sort_order, (int, float)):
+            return JSONResponse({"ok": False, "error": "排序值无效"}, status_code=400)
+        conversation["sort_order"] = sort_order
     conversation["updated_at"] = datetime.now().isoformat()
     save_conversations(conversations)
     return {"ok": True, "conversation": conversation}

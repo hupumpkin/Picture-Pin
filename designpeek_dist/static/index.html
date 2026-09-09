@@ -52,16 +52,23 @@
 
     <!-- Level 2: Project list -->
     <div class="tab-sidebar-content" id="tabSidebarProjects" style="gap:8px;">
-      <div class="filter-list" id="projectStatusFilters">
-        <div class="filter-item all-projects-nav active" data-filter="all">最近分析 <span class="count" id="countAllProjects">0</span></div>
-      </div>
-      <div class="sidebar-divider"></div>
-      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0;">
-        <span>项目</span><button class="btn-icon-mini" onclick="showCreateProject()" title="新建项目">+</button>
+      <section class="analysis-sidebar-section unclassified-analysis-drop" id="unclassifiedAnalysisSection"
+               ondragover="handleAnalysisDragOver(event)" ondragleave="handleAnalysisDragLeave(event)"
+               ondrop="dropConversationIntoGroup(event, null)">
+        <button class="analysis-section-heading" onclick="showUnclassifiedConversations()">
+          <span><i class="ri-inbox-archive-line"></i>待归类分析</span>
+          <span class="count" id="countAllProjects">0</span>
+        </button>
+        <div class="analysis-nav-list" id="unclassifiedAnalysisList"></div>
+      </section>
+      <div class="sidebar-divider analysis-sidebar-divider"></div>
+      <div class="analysis-section-title">
+        <span><i class="ri-folder-3-line"></i>文件夹</span>
+        <button class="btn-icon-mini" onclick="showCreateProject()" title="新建文件夹" aria-label="新建文件夹"><i class="ri-add-line"></i></button>
       </div>
       <div class="nav-list" id="projectNavList"></div>
       <div style="margin-top: auto;">
-        <button class="btn btn-secondary" onclick="showAISettings()" style="width:100%;justify-content:center;font-size:12px;margin-bottom:6px;">AI 设置</button>
+        <button class="btn btn-secondary" onclick="showAISettings()" style="width:100%;justify-content:center;font-size:12px;margin-bottom:6px;"><i class="ri-settings-3-line"></i>AI 设置</button>
       </div>
     </div>
   </div>
@@ -163,14 +170,14 @@
 
 </div>
 
-<!-- Create Project Modal -->
+<!-- Create Analysis Folder Modal -->
 <div class="modal-overlay" id="createProjectModal" style="display:none;">
   <div class="modal">
-    <h3>新建项目</h3>
-    <label>项目名称</label>
-    <input type="text" id="projectNameInput" placeholder="例如：新品频道研究">
+    <h3>新建文件夹</h3>
+    <label>文件夹名称</label>
+    <input type="text" id="projectNameInput" placeholder="例如：电商首页研究">
     <label>描述（可选）</label>
-    <textarea id="projectDescInput" rows="2" placeholder="用于整理相关分析对话"></textarea>
+    <textarea id="projectDescInput" rows="2" placeholder="用于归类相关分析"></textarea>
     <div class="modal-actions">
       <button class="btn btn-secondary btn-sm" onclick="hideCreateProject()">取消</button>
       <button class="btn btn-primary btn-sm" onclick="createProject()">创建</button>

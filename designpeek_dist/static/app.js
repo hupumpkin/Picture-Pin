@@ -93,6 +93,7 @@ let state = {
   appFiltersExpanded: false,
   currentProject: null,
   projectFilter: 'all',
+  collapsedAnalysisFolders: new Set(),
   modalSelected: new Set(),
   lightboxIndex: -1,
   lightboxItems: [],
@@ -314,8 +315,8 @@ async function autoRefreshScreenshots() {
 }
 
 function updateProjectCounts() {
-  const all = state.conversations.length;
-  document.getElementById('countAllProjects').textContent = all;
+  const unclassified = state.conversations.filter(item => !item.project_id).length;
+  document.getElementById('countAllProjects').textContent = unclassified;
 }
 
 // ── Sidebar: Project Nav ─────────────────────────────────
@@ -2187,7 +2188,7 @@ function hideCreateProject() {
 
 async function createProject() {
   const name = document.getElementById('projectNameInput').value.trim();
-  if (!name) { showToast('请输入项目名称'); return; }
+  if (!name) { showToast('请输入文件夹名称'); return; }
   const res = await fetch('/api/projects', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2200,7 +2201,7 @@ async function createProject() {
     if (state.batchMode) renderBatchProjectBtns();
     state.currentProject = null;
     renderProjectList();
-    showToast('项目已创建，可将分析对话拖入归档');
+    showToast('文件夹已创建，可将分析拖入归类');
   }
 }
 
@@ -3199,29 +3200,69 @@ function backToProjectList() {
 
 function renderProjectNav() {
   const el = document.getElementById('projectNavList');
-  if (!el) return;
+  const unclassifiedEl = document.getElementById('unclassifiedAnalysisList');
+  if (!el || !unclassifiedEl) return;
+
+  const unclassified = sortAnalysisNavItems(state.conversations.filter(item => !item.project_id));
+  unclassifiedEl.innerHTML = unclassified.length
+    ? unclassified.map(item => renderAnalysisNavItem(item, null)).join('')
+    : '<div class="analysis-nav-empty">暂无待归类分析</div>';
+
   if (!state.projects.length) {
-    el.innerHTML = '<div class="nav-empty">暂无项目</div>';
+    el.innerHTML = '<div class="analysis-nav-empty folder-empty">还没有文件夹</div>';
+    updateProjectCounts();
     return;
   }
-  const children = new Map();
-  state.projects.forEach(project => {
-    const parent = state.projects.some(item => item.id === project.parent_id) ? project.parent_id : null;
-    if (!children.has(parent)) children.set(parent, []);
-    children.get(parent).push(project);
+  el.innerHTML = state.projects.map(folder => {
+    const children = sortAnalysisNavItems(state.conversations.filter(item => item.project_id === folder.id));
+    const collapsed = state.collapsedAnalysisFolders.has(folder.id);
+    return `<div class="analysis-folder-group">
+      <div class="analysis-folder-row project-drop-target ${state.currentProject?.id === folder.id ? 'active' : ''}"
+           onclick="showProjectConversations('${folder.id}')"
+           ondragover="handleAnalysisDragOver(event)" ondragleave="handleAnalysisDragLeave(event)"
+           ondrop="dropConversationIntoGroup(event, '${folder.id}')">
+        <button class="analysis-folder-toggle" onclick="event.stopPropagation();toggleAnalysisFolder('${folder.id}')" title="${collapsed ? '展开' : '收起'}">
+          <i class="ri-arrow-right-s-line ${collapsed ? '' : 'expanded'}"></i>
+        </button>
+        <i class="${collapsed ? 'ri-folder-3-line' : 'ri-folder-open-line'} analysis-folder-icon"></i>
+        <span class="analysis-folder-name" title="${escapeHtml(folder.name)}">${escapeHtml(folder.name)}</span>
+        <span class="analysis-folder-count">${children.length}</span>
+        <div class="project-nav-actions">
+          <button onclick="event.stopPropagation();renameProjectContainer('${folder.id}')" title="重命名文件夹"><i class="ri-edit-line"></i></button>
+          <button onclick="event.stopPropagation();deleteProjectContainer('${folder.id}')" title="删除文件夹"><i class="ri-delete-bin-line"></i></button>
+        </div>
+      </div>
+      <div class="analysis-folder-children ${collapsed ? 'collapsed' : ''}">
+        ${children.length ? children.map(item => renderAnalysisNavItem(item, folder.id)).join('') : '<div class="analysis-nav-empty">拖入分析进行归类</div>'}
+      </div>
+    </div>`;
+  }).join('');
+  updateProjectCounts();
+}
+
+function sortAnalysisNavItems(items) {
+  return [...items].sort((a, b) => {
+    const aOrder = Number.isFinite(a.sort_order) ? a.sort_order : null;
+    const bOrder = Number.isFinite(b.sort_order) ? b.sort_order : null;
+    if (aOrder !== null && bOrder !== null) return aOrder - bOrder;
+    if (aOrder !== null) return 1;
+    if (bOrder !== null) return -1;
+    return String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || ''));
   });
-  const renderLevel = (parentId, depth = 0) => (children.get(parentId) || []).map(project => `
-    <div class="nav-item nav-item-proj project-drop-target ${state.currentProject?.id === project.id ? 'active' : ''}"
-         style="--project-depth:${depth}" draggable="true" ondragstart="startProjectDrag(event, '${project.id}')"
-         onclick="showProjectConversations('${project.id}')"
-         ondragover="event.preventDefault();this.classList.add('drag-over')"
-         ondragleave="this.classList.remove('drag-over')"
-         ondrop="dropConversationIntoProject(event, '${project.id}')">
-      <div class="project-nav-main"><span class="project-folder-mark">▰</span><span class="project-card-name">${escapeHtml(project.name)}</span></div>
-      <div class="project-card-meta">${project.conversation_count || 0} 个分析</div>
-      <div class="project-nav-actions"><button onclick="event.stopPropagation();renameProjectContainer('${project.id}')" title="重命名">✎</button><button onclick="event.stopPropagation();deleteProjectContainer('${project.id}')" title="删除">×</button></div>
-    </div>${renderLevel(project.id, depth + 1)}`).join('');
-  el.innerHTML = renderLevel(null);
+}
+
+function renderAnalysisNavItem(item, folderId) {
+  const statusClass = item.result ? 'complete' : ['queued', 'analyzing'].includes(item.status?.state) ? 'running' : 'draft';
+  const active = state.currentConversation?.id === item.id ? 'active' : '';
+  const targetFolder = folderId ? `'${folderId}'` : 'null';
+  return `<div class="analysis-nav-item ${active}" draggable="${item.legacy ? 'false' : 'true'}"
+      ondragstart="startConversationDrag(event, '${item.id}')" ondragend="endConversationDrag(event)"
+      ondragover="handleAnalysisItemDragOver(event)" ondragleave="handleAnalysisDragLeave(event)"
+      ondrop="dropConversationBefore(event, '${item.id}', ${targetFolder})" onclick="selectConversation('${item.id}')">
+    <i class="ri-file-chart-line analysis-item-icon"></i>
+    <span class="analysis-item-name" title="${escapeHtml(item.title || '新分析')}">${escapeHtml(item.title || '新分析')}</span>
+    <span class="analysis-status-dot ${statusClass}" title="${item.result ? '已完成' : '待分析'}"></span>
+  </div>`;
 }
 
 function renderProjectList(projectId = null) {
@@ -3229,10 +3270,12 @@ function renderProjectList(projectId = null) {
   if (!el) return;
   hideLegacyToolbarButtons();
   document.getElementById('projectToolbar').style.display = 'none';
-  let items = state.conversations;
-  if (projectId) items = items.filter(item => item.project_id === projectId);
+  let items = projectId
+    ? state.conversations.filter(item => item.project_id === projectId)
+    : state.conversations.filter(item => !item.project_id);
+  items = sortAnalysisNavItems(items);
   const project = state.projects.find(item => item.id === projectId);
-  const heading = project ? escapeHtml(project.name) : '最近分析';
+  const heading = project ? escapeHtml(project.name) : '待归类分析';
   const cards = items.map(renderConversationListCard).join('');
   el.innerHTML = `<div class="conversation-home"><div class="conversation-list-head"><div><span>分析对话</span><h1>${heading}</h1></div><small>${items.length} 个对话</small></div>${cards || '<div class="conversation-empty">从截图页批量选择图片，然后点击「开始分析」</div>'}</div>`;
 }
@@ -3256,6 +3299,19 @@ function showProjectConversations(pid) {
   state.currentConversation = null;
   renderProjectNav();
   renderProjectList(pid);
+}
+
+function showUnclassifiedConversations() {
+  state.currentProject = null;
+  state.currentConversation = null;
+  renderProjectNav();
+  renderProjectList();
+}
+
+function toggleAnalysisFolder(pid) {
+  if (state.collapsedAnalysisFolders.has(pid)) state.collapsedAnalysisFolders.delete(pid);
+  else state.collapsedAnalysisFolders.add(pid);
+  renderProjectNav();
 }
 
 function selectConversation(cid) {
@@ -3469,36 +3525,95 @@ async function deleteConversation() {
   state.currentConversation = null; history.replaceState(null, '', '/'); await Promise.all([loadConversations(), loadProjects()]); backToProjectList(); showToast('对话已删除，截图仍保留');
 }
 
-function startConversationDrag(event, cid) { event.dataTransfer.setData('text/designpeek-conversation', cid); event.dataTransfer.effectAllowed = 'move'; }
-function startProjectDrag(event, pid) { event.stopPropagation(); event.dataTransfer.setData('text/designpeek-project', pid); event.dataTransfer.effectAllowed = 'move'; }
-async function dropConversationIntoProject(event, pid) {
-  event.preventDefault(); event.currentTarget.classList.remove('drag-over');
-  const sourceProject = event.dataTransfer.getData('text/designpeek-project');
-  if (sourceProject) {
-    if (sourceProject === pid) return;
-    const response = await fetch(`/api/projects/${sourceProject}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parent_id: pid }) });
-    const projectData = await response.json();
-    if (!projectData.ok) { showToast(projectData.error || '移动项目失败'); return; }
-    await loadProjects(); showToast('已设为上级项目'); return;
+function startConversationDrag(event, cid) {
+  if (cid.startsWith('legacy_')) { event.preventDefault(); return; }
+  event.dataTransfer.setData('text/designpeek-conversation', cid);
+  event.dataTransfer.effectAllowed = 'move';
+  requestAnimationFrame(() => event.currentTarget?.classList.add('dragging'));
+}
+
+function endConversationDrag(event) {
+  event.currentTarget?.classList.remove('dragging');
+  document.querySelectorAll('.drag-over, .drag-before').forEach(item => item.classList.remove('drag-over', 'drag-before'));
+}
+
+function handleAnalysisDragOver(event) {
+  if (!Array.from(event.dataTransfer.types).includes('text/designpeek-conversation')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.add('drag-over');
+}
+
+function handleAnalysisItemDragOver(event) {
+  if (!Array.from(event.dataTransfer.types).includes('text/designpeek-conversation')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.add('drag-before');
+}
+
+function handleAnalysisDragLeave(event) {
+  if (event.currentTarget.contains(event.relatedTarget)) return;
+  event.currentTarget.classList.remove('drag-over', 'drag-before');
+}
+
+async function saveAnalysisGroupOrder(folderId, orderedIds) {
+  const responses = await Promise.all(orderedIds.map((cid, index) => fetch(`/api/conversations/${cid}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ project_id: folderId, sort_order: index }),
+  })));
+  const results = await Promise.all(responses.map(response => response.json()));
+  const failure = results.find(result => !result.ok);
+  if (failure) throw new Error(failure.error || '移动失败');
+}
+
+async function dropConversationIntoGroup(event, folderId) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.remove('drag-over');
+  const cid = event.dataTransfer.getData('text/designpeek-conversation');
+  if (!cid || cid.startsWith('legacy_')) return;
+  const current = sortAnalysisNavItems(state.conversations.filter(item => item.project_id === folderId && item.id !== cid));
+  try {
+    await saveAnalysisGroupOrder(folderId, [...current.map(item => item.id), cid]);
+    await Promise.all([loadConversations(), loadProjects()]);
+    renderProjectList(state.currentProject?.id || null);
+    showToast(folderId ? '已移入文件夹' : '已移回待归类分析');
+  } catch (error) {
+    showToast(error.message || '移动失败');
   }
-  const cid = event.dataTransfer.getData('text/designpeek-conversation'); if (!cid || cid.startsWith('legacy_')) return;
-  const res = await fetch(`/api/conversations/${cid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id: pid }) });
-  const data = await res.json(); if (!data.ok) { showToast(data.error || '移动失败'); return; }
-  await Promise.all([loadConversations(), loadProjects()]); renderProjectList(state.currentProject?.id || null); showToast('已移入项目');
+}
+
+async function dropConversationBefore(event, targetId, folderId) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.classList.remove('drag-before');
+  const cid = event.dataTransfer.getData('text/designpeek-conversation');
+  if (!cid || cid === targetId || cid.startsWith('legacy_')) return;
+  const group = sortAnalysisNavItems(state.conversations.filter(item => item.project_id === folderId && item.id !== cid));
+  const targetIndex = group.findIndex(item => item.id === targetId);
+  if (targetIndex < 0) return;
+  group.splice(targetIndex, 0, state.conversations.find(item => item.id === cid));
+  try {
+    await saveAnalysisGroupOrder(folderId, group.filter(Boolean).map(item => item.id));
+    await Promise.all([loadConversations(), loadProjects()]);
+    renderProjectList(state.currentProject?.id || null);
+  } catch (error) {
+    showToast(error.message || '排序失败');
+  }
 }
 
 async function renameProjectContainer(pid) {
   const project = state.projects.find(item => item.id === pid); if (!project) return;
-  const name = prompt('项目名称', project.name); if (!name?.trim()) return;
+  const name = prompt('文件夹名称', project.name); if (!name?.trim()) return;
   await fetch(`/api/projects/${pid}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
-  await loadProjects(); renderProjectList(state.currentProject?.id || null); showToast('项目已重命名');
+  await loadProjects(); renderProjectList(state.currentProject?.id || null); showToast('文件夹已重命名');
 }
 
 async function deleteProjectContainer(pid) {
-  if (!confirm('删除这个项目？其中的分析对话会回到“最近分析”，截图不会删除。')) return;
+  if (!confirm('删除这个文件夹？其中的分析会回到“待归类分析”，截图不会删除。')) return;
   const res = await fetch(`/api/projects/${pid}`, { method: 'DELETE' }); const data = await res.json();
   if (!data.ok) { showToast(data.error || '删除失败'); return; }
-  state.currentProject = null; await Promise.all([loadProjects(), loadConversations()]); renderProjectList(); showToast('项目已删除，对话与截图均已保留');
+  state.currentProject = null; await Promise.all([loadProjects(), loadConversations()]); renderProjectList(); showToast('文件夹已删除，分析与截图均已保留');
 }
 
 // ── Start ────────────────────────────────────────────────
