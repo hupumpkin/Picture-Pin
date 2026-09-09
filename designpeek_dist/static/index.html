@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
-  <link rel="stylesheet" href="/static/style.css?v=90">
+  <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
+  <link rel="stylesheet" href="/static/style.css?v=101">
 </head>
 <body>
 <div class="app">
@@ -247,18 +248,50 @@
 <!-- Image Lightbox -->
 <div class="lightbox-overlay" id="lightbox" style="display:none;">
   <div class="lightbox-bg" onclick="closeLightbox()"></div>
-  <button class="lightbox-close" onclick="closeLightbox()">✕</button>
-  <button class="lightbox-nav lightbox-prev" onclick="lightboxPrev()">‹</button>
-  <button class="lightbox-nav lightbox-next" onclick="lightboxNext()">›</button>
+  <button class="lightbox-close" onclick="closeLightbox()" aria-label="关闭" title="关闭 (Esc)"><i class="ri-close-line"></i></button>
+  <button class="lightbox-nav lightbox-prev" onclick="lightboxPrev()" aria-label="上一张" title="上一张 (←)"><i class="ri-arrow-left-s-line"></i></button>
+  <button class="lightbox-nav lightbox-next" onclick="lightboxNext()" aria-label="下一张" title="下一张 (→)"><i class="ri-arrow-right-s-line"></i></button>
   <div class="lightbox-content" id="lightboxContent">
-    <img id="lightboxImg" src="" alt="">
-    <div class="lightbox-info" id="lightboxInfo"></div>
-    <div class="lightbox-actions" id="lightboxActions">
-      <button class="lb-fav-btn" id="lbFavBtn" onclick="toggleFavoriteFromBtn()" aria-pressed="false">☆ 收藏</button>
-      <input type="text" id="lightboxNoteInput" class="lb-note-input" placeholder="添加备注..." onkeydown="if(event.key==='Enter')saveLightboxNote()" onblur="saveLightboxNote()">
+    <div class="lightbox-stage" id="lightboxStage">
+      <div class="lightbox-image-transform" id="lightboxImageTransform">
+        <img id="lightboxImg" src="" alt="" draggable="false">
+      </div>
+      <div class="lightbox-zoom-hint" id="lightboxZoomHint">滚轮缩放 · 拖拽查看细节 · 双击切换 100%</div>
+    </div>
+    <div class="lightbox-caption-row">
+      <div class="lightbox-info" id="lightboxInfo"></div>
+      <div class="lightbox-counter" id="lightboxCounter"></div>
+    </div>
+    <div class="lightbox-tool-strip" id="lightboxToolStrip">
+      <div class="lb-tool-group">
+        <button class="lb-icon-btn" onclick="zoomLightboxStep(-1)" aria-label="缩小" title="缩小 (-)"><i class="ri-zoom-out-line"></i></button>
+        <button class="lb-zoom-value" id="lbZoomValue" onclick="resetLightboxView()" title="适合窗口">100%</button>
+        <button class="lb-icon-btn" onclick="zoomLightboxStep(1)" aria-label="放大" title="放大 (+)"><i class="ri-zoom-in-line"></i></button>
+        <button class="lb-icon-btn" onclick="resetLightboxView()" aria-label="适合窗口" title="适合窗口 (0)"><i class="ri-aspect-ratio-line"></i></button>
+        <button class="lb-icon-btn lb-one-to-one" onclick="showLightboxActualSize()" aria-label="原始尺寸" title="原始尺寸 (1)">1:1</button>
+      </div>
+      <div class="lb-tool-divider"></div>
+      <div class="lb-tool-group">
+        <button class="lb-icon-btn" onclick="rotateLightbox(-90)" aria-label="向左旋转查看" title="向左旋转查看 ([)"><i class="ri-anticlockwise-line"></i></button>
+        <button class="lb-icon-btn" onclick="rotateLightbox(90)" aria-label="向右旋转查看" title="向右旋转查看 (])"><i class="ri-clockwise-line"></i></button>
+        <button class="lb-icon-btn" onclick="pickLightboxColor()" aria-label="从图片取色" title="从图片取色"><i class="ri-palette-line"></i></button>
+      </div>
+      <div class="lb-tool-divider"></div>
+      <div class="lb-tool-group">
+        <button class="lb-icon-btn" onclick="copyCurrentLightboxImage()" aria-label="复制图片" title="复制图片"><i class="ri-file-copy-line"></i></button>
+        <button class="lb-icon-btn" onclick="downloadCurrentLightboxImage()" aria-label="下载原图" title="下载原图"><i class="ri-download-2-line"></i></button>
+        <button class="lb-icon-btn" onclick="revealCurrentLightboxImage()" aria-label="在访达中显示" title="在访达中显示"><i class="ri-folder-open-line"></i></button>
+        <button class="lb-icon-btn" id="lbInfoBtn" onclick="toggleLightboxDetails()" aria-label="图片信息" aria-pressed="false" title="图片信息"><i class="ri-information-line"></i></button>
+      </div>
+      <div class="lb-tool-divider"></div>
+      <button class="lb-fav-btn" id="lbFavBtn" onclick="toggleFavoriteFromBtn()" aria-pressed="false"><i class="ri-heart-line"></i><span>收藏</span></button>
+      <div class="lb-note-wrap"><i class="ri-pencil-line"></i><input type="text" id="lightboxNoteInput" class="lb-note-input" placeholder="添加备注..." onkeydown="if(event.key==='Enter')saveLightboxNote()" onblur="saveLightboxNote()"></div>
+    </div>
+    <div class="lightbox-details" id="lightboxDetails" hidden></div>
+    <div class="lightbox-color-result" id="lightboxColorResult" hidden>
+      <span id="lightboxColorSwatch"></span><strong id="lightboxColorValue"></strong><small>已复制色值</small>
     </div>
   </div>
-  <div class="lightbox-counter" id="lightboxCounter"></div>
 </div>
 
 <!-- Phone Upload Guide Modal -->
@@ -308,6 +341,6 @@
   </div>
 </div>
 
-  <script src="/static/app.js?v=140"></script>
+  <script src="/static/app.js?v=151"></script>
 </body>
 </html>

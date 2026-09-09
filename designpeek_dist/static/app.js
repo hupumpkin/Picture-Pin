@@ -96,6 +96,12 @@ let state = {
   modalSelected: new Set(),
   lightboxIndex: -1,
   lightboxItems: [],
+  lightboxZoom: 1,
+  lightboxFitScale: 1,
+  lightboxPan: { x: 0, y: 0 },
+  lightboxRotation: 0,
+  lightboxDrag: null,
+  lightboxDetailsOpen: false,
   searchQuery: '',
   searchResults: null,
   searchIndexing: false,
@@ -123,6 +129,7 @@ async function init() {
   setupTabs();
   setupProjectFilters();
   setupLassoSelection();
+  setupLightboxInteractions();
   checkAndroidStatus();
   startRealtimeRefresh();
 
@@ -2361,8 +2368,10 @@ function hidePhoneGuide() {
 // ── Keyboard ─────────────────────────────────────────────
 
 document.addEventListener('keydown', (e) => {
+  const lightboxOpen = document.getElementById('lightbox').style.display === 'flex';
+  const editingText = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
   if (e.key === 'Escape') {
-    if (document.getElementById('lightbox').style.display === 'flex') closeLightbox();
+    if (lightboxOpen) closeLightbox();
     else if (document.getElementById('phoneGuideModal').style.display === 'flex') hidePhoneGuide();
     else if (document.getElementById('createProjectModal').style.display === 'flex') hideCreateProject();
     else if (document.getElementById('addScreenshotsModal').style.display === 'flex') hideAddScreenshots();
@@ -2370,14 +2379,21 @@ document.addEventListener('keydown', (e) => {
     else if (document.getElementById('importProjectModal').style.display === 'flex') hideImportProject();
     else if (state.batchMode) toggleBatchMode();
   }
-  if (e.key === 'ArrowLeft' && document.getElementById('lightbox').style.display === 'flex') {
+  if (editingText || !lightboxOpen) return;
+  if (e.key === 'ArrowLeft') {
     e.preventDefault();
     lightboxPrev();
   }
-  if (e.key === 'ArrowRight' && document.getElementById('lightbox').style.display === 'flex') {
+  if (e.key === 'ArrowRight') {
     e.preventDefault();
     lightboxNext();
   }
+  if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomLightboxStep(1); }
+  if (e.key === '-') { e.preventDefault(); zoomLightboxStep(-1); }
+  if (e.key === '0') { e.preventDefault(); resetLightboxView(); }
+  if (e.key === '1') { e.preventDefault(); showLightboxActualSize(); }
+  if (e.key === '[') { e.preventDefault(); rotateLightbox(-90); }
+  if (e.key === ']') { e.preventDefault(); rotateLightbox(90); }
 });
 
 // ── Phone Capture ────────────────────────────────────────
@@ -2761,13 +2777,149 @@ function closeLightbox() {
   document.body.style.overflow = '';
   state.lightboxItems = [];
   state.lightboxIndex = -1;
+  state.lightboxDrag = null;
+}
+
+function setupLightboxInteractions() {
+  const stage = document.getElementById('lightboxStage');
+  if (!stage || stage.dataset.ready) return;
+  stage.dataset.ready = 'true';
+  stage.addEventListener('wheel', event => {
+    event.preventDefault();
+    const factor = Math.exp(-event.deltaY * 0.0016);
+    zoomLightboxAt(state.lightboxZoom * factor, event.clientX, event.clientY);
+  }, { passive: false });
+  stage.addEventListener('dblclick', event => {
+    event.preventDefault();
+    const actualScale = state.lightboxFitScale * state.lightboxZoom;
+    if (Math.abs(actualScale - 1) < 0.06) resetLightboxView();
+    else showLightboxActualSize(event.clientX, event.clientY);
+  });
+  stage.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || state.lightboxZoom <= 1.01) return;
+    state.lightboxDrag = { x: event.clientX, y: event.clientY,
+                           panX: state.lightboxPan.x, panY: state.lightboxPan.y };
+    stage.classList.add('dragging');
+    stage.setPointerCapture(event.pointerId);
+  });
+  stage.addEventListener('pointermove', event => {
+    if (!state.lightboxDrag) return;
+    state.lightboxPan.x = state.lightboxDrag.panX + event.clientX - state.lightboxDrag.x;
+    state.lightboxPan.y = state.lightboxDrag.panY + event.clientY - state.lightboxDrag.y;
+    clampLightboxPan();
+    applyLightboxTransform(false);
+  });
+  const endDrag = event => {
+    if (!state.lightboxDrag) return;
+    state.lightboxDrag = null;
+    stage.classList.remove('dragging');
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+  };
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+  window.addEventListener('resize', () => {
+    if (document.getElementById('lightbox').style.display === 'flex') fitLightboxImage();
+  });
+}
+
+function fitLightboxImage() {
+  const image = document.getElementById('lightboxImg');
+  const stage = document.getElementById('lightboxStage');
+  if (!image.naturalWidth || !stage.clientWidth || !stage.clientHeight) return;
+  const turned = Math.abs(state.lightboxRotation % 180) === 90;
+  const visualWidth = turned ? image.naturalHeight : image.naturalWidth;
+  const visualHeight = turned ? image.naturalWidth : image.naturalHeight;
+  state.lightboxFitScale = Math.min((stage.clientWidth - 24) / visualWidth,
+                                    (stage.clientHeight - 24) / visualHeight, 1);
+  image.style.width = `${image.naturalWidth * state.lightboxFitScale}px`;
+  image.style.height = `${image.naturalHeight * state.lightboxFitScale}px`;
+  state.lightboxZoom = 1;
+  state.lightboxPan = { x: 0, y: 0 };
+  applyLightboxTransform();
+  populateLightboxDetails();
+}
+
+function resetLightboxView() {
+  state.lightboxZoom = 1;
+  state.lightboxPan = { x: 0, y: 0 };
+  applyLightboxTransform();
+}
+
+function showLightboxActualSize(clientX, clientY) {
+  const targetZoom = 1 / Math.max(state.lightboxFitScale, 0.01);
+  if (clientX !== undefined) zoomLightboxAt(targetZoom, clientX, clientY);
+  else {
+    state.lightboxZoom = targetZoom;
+    state.lightboxPan = { x: 0, y: 0 };
+    applyLightboxTransform();
+  }
+}
+
+function zoomLightboxStep(direction) {
+  const stage = document.getElementById('lightboxStage');
+  const factor = direction > 0 ? 1.25 : 0.8;
+  const rect = stage.getBoundingClientRect();
+  zoomLightboxAt(state.lightboxZoom * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+}
+
+function zoomLightboxAt(nextZoom, clientX, clientY) {
+  const stage = document.getElementById('lightboxStage');
+  const rect = stage.getBoundingClientRect();
+  const minZoom = Math.min(1, 0.08 / Math.max(state.lightboxFitScale, 0.01));
+  const maxZoom = 8 / Math.max(state.lightboxFitScale, 0.01);
+  nextZoom = Math.max(minZoom, Math.min(maxZoom, nextZoom));
+  const ratio = nextZoom / state.lightboxZoom;
+  const pointerX = clientX - (rect.left + rect.width / 2);
+  const pointerY = clientY - (rect.top + rect.height / 2);
+  state.lightboxPan.x = pointerX - (pointerX - state.lightboxPan.x) * ratio;
+  state.lightboxPan.y = pointerY - (pointerY - state.lightboxPan.y) * ratio;
+  state.lightboxZoom = nextZoom;
+  clampLightboxPan();
+  applyLightboxTransform();
+}
+
+function clampLightboxPan() {
+  const image = document.getElementById('lightboxImg');
+  const stage = document.getElementById('lightboxStage');
+  const turned = Math.abs(state.lightboxRotation % 180) === 90;
+  const width = (turned ? image.offsetHeight : image.offsetWidth) * state.lightboxZoom;
+  const height = (turned ? image.offsetWidth : image.offsetHeight) * state.lightboxZoom;
+  const maxX = width > stage.clientWidth ? (width - stage.clientWidth) / 2 + stage.clientWidth * 0.16 : 0;
+  const maxY = height > stage.clientHeight ? (height - stage.clientHeight) / 2 + stage.clientHeight * 0.16 : 0;
+  state.lightboxPan.x = Math.max(-maxX, Math.min(maxX, state.lightboxPan.x));
+  state.lightboxPan.y = Math.max(-maxY, Math.min(maxY, state.lightboxPan.y));
+}
+
+function applyLightboxTransform(animate = true) {
+  const transform = document.getElementById('lightboxImageTransform');
+  const image = document.getElementById('lightboxImg');
+  const stage = document.getElementById('lightboxStage');
+  if (!transform || !image) return;
+  transform.style.transition = animate ? '' : 'none';
+  transform.style.transform = `translate3d(${state.lightboxPan.x}px, ${state.lightboxPan.y}px, 0) scale(${state.lightboxZoom})`;
+  image.style.transform = `rotate(${state.lightboxRotation}deg)`;
+  const actualPercent = Math.round(state.lightboxFitScale * state.lightboxZoom * 100);
+  document.getElementById('lbZoomValue').textContent = `${actualPercent}%`;
+  stage.classList.toggle('can-pan', state.lightboxZoom > 1.01);
+}
+
+function rotateLightbox(degrees) {
+  state.lightboxRotation = (state.lightboxRotation + degrees + 360) % 360;
+  fitLightboxImage();
 }
 
 function showLightboxImage() {
   const item = state.lightboxItems[state.lightboxIndex];
   if (!item) return;
 
-  document.getElementById('lightboxImg').src = `/screenshots/${item.path}`;
+  const image = document.getElementById('lightboxImg');
+  state.lightboxRotation = 0;
+  state.lightboxDetailsOpen = false;
+  document.getElementById('lightboxDetails').hidden = true;
+  document.getElementById('lbInfoBtn').classList.remove('active');
+  document.getElementById('lbInfoBtn').setAttribute('aria-pressed', 'false');
+  image.onload = () => requestAnimationFrame(fitLightboxImage);
+  image.src = `/screenshots/${item.path}`;
 
   // Build info
   const date = new Date((item.mtime || 0) * 1000);
@@ -2788,7 +2940,7 @@ function showLightboxImage() {
 
   // Fav button
   const favBtn = document.getElementById('lbFavBtn');
-  favBtn.textContent = isFav ? '★ 取消收藏' : '☆ 收藏';
+  favBtn.innerHTML = `<i class="${isFav ? 'ri-heart-fill' : 'ri-heart-line'}"></i><span>${isFav ? '取消收藏' : '收藏'}</span>`;
   favBtn.setAttribute('aria-pressed', String(!!isFav));
   if (isFav) favBtn.classList.add('active');
   else favBtn.classList.remove('active');
@@ -2809,6 +2961,91 @@ function showLightboxImage() {
     state.lightboxIndex < state.lightboxItems.length - 1 ? 'flex' : 'none';
 }
 
+function getCurrentLightboxItem() {
+  return state.lightboxItems[state.lightboxIndex] || null;
+}
+
+async function populateLightboxDetails() {
+  const item = getCurrentLightboxItem();
+  const image = document.getElementById('lightboxImg');
+  if (!item || !image.naturalWidth) return;
+  let bytes = 0;
+  try {
+    const response = await fetch(`/screenshots/${item.path}`, { method: 'HEAD' });
+    bytes = Number(response.headers.get('content-length') || 0);
+  } catch (error) {}
+  if (getCurrentLightboxItem()?.id !== item.id) return;
+  const folder = state.folders.find(entry => entry.id === item.folder_id);
+  const extension = (item.path.split('.').pop() || '').toUpperCase();
+  const date = new Date((item.mtime || 0) * 1000);
+  document.getElementById('lightboxDetails').innerHTML = [
+    ['尺寸', `${image.naturalWidth} × ${image.naturalHeight} px`],
+    ['格式', extension || '未知'],
+    ['文件大小', formatFileSize(bytes)],
+    ['素材位置', folder?.name || '新添加截图'],
+    ['添加时间', date.toLocaleString('zh-CN', { hour12: false })],
+  ].map(([label, value]) => `<div class="lb-detail-item"><span>${label}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>`).join('');
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return '未知';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function toggleLightboxDetails() {
+  state.lightboxDetailsOpen = !state.lightboxDetailsOpen;
+  const panel = document.getElementById('lightboxDetails');
+  const button = document.getElementById('lbInfoBtn');
+  panel.hidden = !state.lightboxDetailsOpen;
+  button.classList.toggle('active', state.lightboxDetailsOpen);
+  button.setAttribute('aria-pressed', String(state.lightboxDetailsOpen));
+  if (state.lightboxDetailsOpen) populateLightboxDetails();
+}
+
+function copyCurrentLightboxImage() {
+  const item = getCurrentLightboxItem();
+  if (item) copyScreenshot(item.id);
+}
+
+function downloadCurrentLightboxImage() {
+  const item = getCurrentLightboxItem();
+  if (!item) return;
+  const link = document.createElement('a');
+  link.href = `/screenshots/${item.path}`;
+  link.download = item.path.split('/').pop() || `${item.id}.png`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  showToast('正在下载原图');
+}
+
+function revealCurrentLightboxImage() {
+  const item = getCurrentLightboxItem();
+  if (item) openScreenshotFolders([item.id]);
+}
+
+let lightboxColorTimer = null;
+async function pickLightboxColor() {
+  if (!window.EyeDropper) {
+    showToast('当前浏览器不支持取色器');
+    return;
+  }
+  try {
+    const result = await new EyeDropper().open();
+    await navigator.clipboard.writeText(result.sRGBHex.toUpperCase());
+    const panel = document.getElementById('lightboxColorResult');
+    document.getElementById('lightboxColorSwatch').style.background = result.sRGBHex;
+    document.getElementById('lightboxColorValue').textContent = result.sRGBHex.toUpperCase();
+    panel.hidden = false;
+    clearTimeout(lightboxColorTimer);
+    lightboxColorTimer = setTimeout(() => { panel.hidden = true; }, 2600);
+  } catch (error) {
+    // Closing the system color picker is a normal cancellation.
+  }
+}
+
 async function toggleFavoriteFromBtn() {
   const btn = document.getElementById('lbFavBtn');
   const id = btn.dataset.sid;
@@ -2822,7 +3059,7 @@ async function toggleFavoriteFromBtn() {
   const data = await res.json();
   if (data.ok) {
     const isFav = data.favorite;
-    btn.textContent = isFav ? '★ 取消收藏' : '☆ 收藏';
+    btn.innerHTML = `<i class="${isFav ? 'ri-heart-fill' : 'ri-heart-line'}"></i><span>${isFav ? '取消收藏' : '收藏'}</span>`;
     btn.setAttribute('aria-pressed', String(isFav));
     if (isFav) {
       btn.classList.add('active');
