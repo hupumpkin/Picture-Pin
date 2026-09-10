@@ -2,72 +2,173 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>DesignPeek · 上传截图</title>
-<link rel="stylesheet" href="/static/style.css">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>DesignPeek · 手机传图</title>
+<link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
+<link rel="stylesheet" href="/static/style.css?v=103">
 </head>
-<body>
-<div class="upload-page">
-  <h1>DesignPeek</h1>
-  <p class="sub">截图上传</p>
+<body class="mobile-upload-page">
+  <main class="mobile-upload-shell">
+    <header class="mobile-upload-brand">
+      <span class="mobile-upload-logo"><i class="ri-image-circle-line"></i></span>
+      <div><strong>DesignPeek</strong><span>手机传图</span></div>
+    </header>
 
-  <div class="drop-zone" id="dropZone">
-    <div class="icon">📤</div>
-    <p>点击选择或拖拽截图到这里</p>
-    <p class="hint">支持 PNG、JPG、HEIC，可多选</p>
-    <input type="file" id="fileInput" accept="image/*" multiple hidden>
-  </div>
+    <section id="uploadReady">
+      <div class="mobile-upload-connection"><i class="ri-wifi-line"></i><span>已连接到你的电脑</span></div>
+      <h1>从相册选择图片</h1>
+      <p class="mobile-upload-lead">支持一次选择多张截图，上传后会进入“新添加截图”。</p>
+      <button class="mobile-photo-picker" id="pickButton" type="button">
+        <i class="ri-image-add-line"></i>
+        <span>选择照片</span>
+        <small>PNG、JPG、HEIC，单张不超过 30 MB</small>
+      </button>
+      <input type="file" id="fileInput" accept="image/*" multiple hidden>
 
-  <div class="progress-bar" id="progressBar" style="display:none;">
-    <div class="fill" id="progressFill" style="width:0%"></div>
-  </div>
-  <p id="statusText" style="margin-top:12px;font-size:13px;color:var(--text-muted);"></p>
+      <div class="mobile-selection" id="selectionSummary" hidden>
+        <div><strong id="selectionCount">已选择 0 张</strong><span id="selectionSize"></span></div>
+        <button type="button" id="reselectButton">重新选择</button>
+      </div>
+      <div class="mobile-upload-progress" id="uploadProgress" hidden>
+        <div class="mobile-progress-copy"><span>正在上传</span><strong id="progressPercent">0%</strong></div>
+        <div class="mobile-progress-track"><span id="progressFill"></span></div>
+        <p id="currentFilename"></p>
+      </div>
+      <button class="mobile-send-button" id="sendButton" type="button" disabled>
+        <i class="ri-send-plane-2-line"></i><span>发送到电脑</span>
+      </button>
+      <p class="mobile-upload-privacy"><i class="ri-lock-2-line"></i>图片只在当前 Wi-Fi 或热点中传输，不经过云端</p>
+    </section>
 
-  <a href="/" style="margin-top:24px;color:var(--text-muted);text-decoration:none;font-size:13px;">← 返回主页</a>
-</div>
+    <section class="mobile-upload-result" id="uploadResult" hidden>
+      <i class="ri-checkbox-circle-fill"></i>
+      <h1 id="resultTitle">发送完成</h1>
+      <p id="resultCopy"></p>
+      <button class="mobile-send-button" type="button" onclick="resetUploader()"><i class="ri-add-line"></i><span>继续选择照片</span></button>
+    </section>
+
+    <section class="mobile-upload-result error" id="uploadUnavailable" hidden>
+      <i class="ri-wifi-off-line"></i>
+      <h1>无法连接电脑</h1>
+      <p id="unavailableReason">二维码可能已失效，或者手机与电脑不在同一网络。</p>
+      <div class="mobile-network-help"><strong>请检查</strong><span>手机和电脑连接同一 Wi-Fi</span><span>或让电脑连接当前手机热点</span><span>回到电脑重新打开二维码</span></div>
+    </section>
+  </main>
 
 <script>
-const dropZone = document.getElementById('dropZone');
+const token = new URLSearchParams(location.search).get('token');
 const fileInput = document.getElementById('fileInput');
-const progressBar = document.getElementById('progressBar');
-const progressFill = document.getElementById('progressFill');
-const statusText = document.getElementById('statusText');
+const pickButton = document.getElementById('pickButton');
+const reselectButton = document.getElementById('reselectButton');
+const sendButton = document.getElementById('sendButton');
+let selectedFiles = [];
 
-dropZone.addEventListener('click', () => fileInput.click());
-fileInput.addEventListener('change', (e) => uploadFiles(e.target.files));
-
-dropZone.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  dropZone.classList.add('dragover');
+pickButton.addEventListener('click', () => fileInput.click());
+reselectButton.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  selectedFiles = [...fileInput.files];
+  renderSelection();
 });
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-dropZone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropZone.classList.remove('dragover');
-  uploadFiles(e.dataTransfer.files);
-});
+sendButton.addEventListener('click', uploadSelectedFiles);
 
-async function uploadFiles(files) {
-  if (!files.length) return;
-  progressBar.style.display = 'block';
-  statusText.textContent = `共 ${files.length} 张，开始上传...`;
+function formatBytes(bytes) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
-  let done = 0;
-  for (const file of files) {
+function renderSelection() {
+  const total = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+  document.getElementById('selectionSummary').hidden = !selectedFiles.length;
+  document.getElementById('selectionCount').textContent = `已选择 ${selectedFiles.length} 张`;
+  document.getElementById('selectionSize').textContent = formatBytes(total);
+  sendButton.disabled = !selectedFiles.length;
+  sendButton.querySelector('span').textContent = selectedFiles.length ? `发送 ${selectedFiles.length} 张到电脑` : '发送到电脑';
+}
+
+function uploadFile(file, index, total) {
+  return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append('file', file);
+    const request = new XMLHttpRequest();
+    request.open('POST', `/api/mobile-upload/${encodeURIComponent(token)}`);
+    request.upload.onprogress = event => {
+      if (!event.lengthComputable) return;
+      updateProgress(((index + event.loaded / event.total) / total) * 100, `${index + 1}/${total} · ${file.name}`);
+    };
+    request.onload = () => {
+      let data = {};
+      try { data = JSON.parse(request.responseText); } catch (error) {}
+      if (request.status >= 200 && request.status < 300 && data.ok) resolve(data);
+      else reject(new Error(data.error || `上传失败 (${request.status})`));
+    };
+    request.onerror = () => reject(new Error('网络连接中断'));
+    request.send(form);
+  });
+}
+
+function updateProgress(percent, filename) {
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  document.getElementById('progressFill').style.width = `${value}%`;
+  document.getElementById('progressPercent').textContent = `${value}%`;
+  document.getElementById('currentFilename').textContent = filename;
+}
+
+async function uploadSelectedFiles() {
+  if (!selectedFiles.length) return;
+  sendButton.disabled = true;
+  document.getElementById('uploadProgress').hidden = false;
+  pickButton.disabled = true;
+  reselectButton.disabled = true;
+  let uploaded = 0;
+  const failures = [];
+  for (let index = 0; index < selectedFiles.length; index++) {
     try {
-      await fetch('/api/upload', { method: 'POST', body: form });
-      done++;
-      progressFill.style.width = (done / files.length * 100) + '%';
-      statusText.textContent = `已上传 ${done}/${files.length}`;
-    } catch (err) {
-      statusText.textContent = `上传失败: ${file.name}`;
+      await uploadFile(selectedFiles[index], index, selectedFiles.length);
+      uploaded++;
+    } catch (error) {
+      failures.push(`${selectedFiles[index].name}：${error.message}`);
+      if (error.message.includes('过期')) break;
     }
   }
-  statusText.textContent = `完成！${files.length} 张截图已上传`;
-  setTimeout(() => { progressBar.style.display = 'none'; progressFill.style.width = '0%'; }, 2000);
+  updateProgress(100, '传输完成');
+  document.getElementById('uploadReady').hidden = true;
+  document.getElementById('uploadResult').hidden = false;
+  document.getElementById('resultTitle').textContent = failures.length ? `已发送 ${uploaded} 张` : '发送完成';
+  document.getElementById('resultCopy').textContent = failures.length
+    ? `${failures.length} 张未成功，可返回电脑刷新二维码后重试。`
+    : `${uploaded} 张图片已进入电脑的“新添加截图”。`;
 }
+
+function resetUploader() {
+  selectedFiles = [];
+  fileInput.value = '';
+  document.getElementById('uploadReady').hidden = false;
+  document.getElementById('uploadResult').hidden = true;
+  document.getElementById('uploadProgress').hidden = true;
+  pickButton.disabled = false;
+  reselectButton.disabled = false;
+  document.getElementById('progressFill').style.width = '0%';
+  renderSelection();
+}
+
+async function validateConnection() {
+  if (!token) return showUnavailable('这个上传地址不完整，请重新扫描电脑上的二维码。');
+  try {
+    const response = await fetch(`/api/mobile-upload/session/${encodeURIComponent(token)}`);
+    const data = await response.json();
+    if (!data.ok) return showUnavailable(data.error || '二维码已经失效。');
+  } catch (error) {
+    showUnavailable('无法访问电脑，请确认手机和电脑连接在同一 Wi-Fi 或热点。');
+  }
+}
+
+function showUnavailable(reason) {
+  document.getElementById('uploadReady').hidden = true;
+  document.getElementById('uploadUnavailable').hidden = false;
+  document.getElementById('unavailableReason').textContent = reason;
+}
+
+validateConnection();
 </script>
 </body>
 </html>

@@ -4,8 +4,10 @@
 import base64
 import hashlib
 import json
+import io
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -16,9 +18,10 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
+import qrcode
 
 from config import (
     ANALYSIS_FILE,
@@ -60,8 +63,12 @@ _OCR_BUILD_LOCK = threading.Lock()
 _ANALYSIS_WRITE_LOCK = threading.Lock()
 _PROJECTS_WRITE_LOCK = threading.Lock()
 _CONVERSATIONS_WRITE_LOCK = threading.Lock()
+_MOBILE_UPLOAD_LOCK = threading.Lock()
 _OCR_AVAILABLE = _PYOBJC_OCR_AVAILABLE or bool(shutil.which("swiftc") or shutil.which("xcrun"))
 _OCR_INDEX_STATE = {"running": False, "processed": 0, "total": 0, "error": None}
+_MOBILE_UPLOAD_SESSIONS = {}
+MOBILE_UPLOAD_SESSION_TTL = 30 * 60
+MOBILE_UPLOAD_MAX_BYTES = 30 * 1024 * 1024
 
 
 def _ensure_ocr_binary():
@@ -501,6 +508,17 @@ async def startup_ocr_index():
 
 def get_local_ip():
     """Get the local network IP address."""
+    for interface in ("en0", "en1", "en2"):
+        try:
+            result = subprocess.run(
+                ["ipconfig", "getifaddr", interface], capture_output=True,
+                text=True, timeout=2,
+            )
+            candidate = result.stdout.strip()
+            if candidate and not candidate.startswith("169.254."):
+                return candidate
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            break
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -509,6 +527,27 @@ def get_local_ip():
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def _mobile_upload_session(token):
+    with _MOBILE_UPLOAD_LOCK:
+        session = _MOBILE_UPLOAD_SESSIONS.get(token)
+        if not session:
+            return None
+        if session["expires_at"] <= time.time():
+            _MOBILE_UPLOAD_SESSIONS.pop(token, None)
+            return None
+        return dict(session)
+
+
+def _mobile_upload_public_session(session):
+    return {
+        "token": session["token"],
+        "url": session["url"],
+        "expires_at": session["expires_at"],
+        "received": session["received"],
+        "last_filename": session.get("last_filename"),
+    }
 
 
 def _detect_image_ext(content: bytes, filename: str = "", content_type: str = "") -> str:
@@ -605,6 +644,84 @@ async def api_upload(file: UploadFile = File(...)):
     print(f"  ✓ 收到截图: {name}  ({len(content) / 1024:.0f} KB)")
     _schedule_ocr(path)
 
+    return {"ok": True, "filename": name}
+
+
+@app.post("/api/mobile-upload/session")
+async def api_create_mobile_upload_session():
+    token = secrets.token_urlsafe(24)
+    local_ip = get_local_ip()
+    session = {
+        "token": token,
+        "url": f"http://{local_ip}:{PORT}/upload?token={token}",
+        "expires_at": time.time() + MOBILE_UPLOAD_SESSION_TTL,
+        "received": 0,
+        "last_filename": None,
+    }
+    with _MOBILE_UPLOAD_LOCK:
+        now = time.time()
+        expired = [key for key, value in _MOBILE_UPLOAD_SESSIONS.items()
+                   if value["expires_at"] <= now]
+        for key in expired:
+            _MOBILE_UPLOAD_SESSIONS.pop(key, None)
+        _MOBILE_UPLOAD_SESSIONS[token] = session
+    return {"ok": True, "session": _mobile_upload_public_session(session)}
+
+
+@app.get("/api/mobile-upload/session/{token}")
+async def api_get_mobile_upload_session(token: str):
+    session = _mobile_upload_session(token)
+    if not session:
+        return JSONResponse({"ok": False, "error": "连接已过期"}, status_code=404)
+    return {"ok": True, "session": _mobile_upload_public_session(session)}
+
+
+@app.delete("/api/mobile-upload/session/{token}")
+async def api_delete_mobile_upload_session(token: str):
+    with _MOBILE_UPLOAD_LOCK:
+        _MOBILE_UPLOAD_SESSIONS.pop(token, None)
+    return {"ok": True}
+
+
+@app.get("/api/mobile-upload/session/{token}/qr")
+async def api_mobile_upload_qr(token: str):
+    session = _mobile_upload_session(token)
+    if not session:
+        return JSONResponse({"ok": False, "error": "连接已过期"}, status_code=404)
+    image = qrcode.make(session["url"])
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return StreamingResponse(output, media_type="image/png",
+                             headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/mobile-upload/{token}")
+async def api_mobile_upload(token: str, file: UploadFile = File(...)):
+    if not _mobile_upload_session(token):
+        return JSONResponse({"ok": False, "error": "连接已过期，请在电脑上重新打开二维码"}, status_code=403)
+    content = await file.read()
+    if not content:
+        return JSONResponse({"ok": False, "error": "图片内容为空"}, status_code=400)
+    if len(content) > MOBILE_UPLOAD_MAX_BYTES:
+        return JSONResponse({"ok": False, "error": "单张图片不能超过 30 MB"}, status_code=413)
+
+    ext = os.path.splitext(file.filename or "screenshot.png")[1] or ".png"
+    name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}{ext}"
+    target = os.path.join(INBOX_DIR, name)
+    try:
+        path = save_uploaded_image(content, target, file.filename, file.content_type or "")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"图片保存失败：{exc}"}, status_code=400)
+
+    name = os.path.basename(path)
+    _schedule_ocr(path)
+    with _MOBILE_UPLOAD_LOCK:
+        session = _MOBILE_UPLOAD_SESSIONS.get(token)
+        if session:
+            session["received"] += 1
+            session["last_filename"] = name
+    print(f"  ✓ 手机相册上传: {name}  ({len(content) / 1024:.0f} KB)")
     return {"ok": True, "filename": name}
 
 
@@ -766,6 +883,7 @@ async def api_delete(req: Request):
             break
 
     _remove_empty_screenshot_dirs()
+    deleted_set = set(deleted)
 
     # Also remove from analysis
     analysis = load_analysis()

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
   <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
-  <link rel="stylesheet" href="/static/style.css?v=101">
+  <link rel="stylesheet" href="/static/style.css?v=103">
 </head>
 <body>
 <div class="app">
@@ -79,7 +79,7 @@
     <div style="display:flex;gap:6px;">
       <input type="file" id="fileUploadInput" accept="image/*" multiple style="display:none;" onchange="handleFileUpload(event)">
       <button class="btn btn-secondary" onclick="document.getElementById('fileUploadInput').click()" style="flex:1;justify-content:center;font-size:12px;">💻 本地上传</button>
-      <button class="btn btn-secondary" onclick="showPhoneGuide()" style="flex:1;justify-content:center;font-size:12px;">🍎 苹果指南</button>
+      <button class="btn btn-secondary" onclick="showPhoneGuide()" style="flex:1;justify-content:center;font-size:12px;"><i class="ri-qr-code-line"></i>手机传图</button>
     </div>
   </div>
 </aside>
@@ -301,53 +301,34 @@
   </div>
 </div>
 
-<!-- Phone Upload Guide Modal -->
+<!-- Local mobile upload modal -->
 <div class="modal-overlay" id="phoneGuideModal" style="display:none;">
-  <div class="modal modal-wide" style="max-width:560px;">
-    <h3>📱 手机上传设置指南</h3>
-    <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px;">配置好后，在 iPhone 控制中心一键发送截图到 Mac</p>
-
-    <div class="guide-steps">
-      <div class="guide-step">
-        <div class="guide-step-num">1</div>
-        <div class="guide-step-content">
-          <div class="guide-step-title">在 Mac 上启动服务</div>
-          <div class="guide-step-desc">终端运行 <code>python server.py</code>，记下显示的 IP 地址（如 <code>192.168.1.10</code>）</div>
-        </div>
+  <div class="modal modal-wide phone-upload-modal">
+    <div class="phone-upload-head">
+      <div><h3>手机扫码传图</h3><p>手机和电脑连接同一 Wi-Fi，或让电脑连接手机热点</p></div>
+      <button class="light-icon-button" onclick="hidePhoneGuide()" title="关闭" aria-label="关闭"><i class="ri-close-line"></i></button>
+    </div>
+    <div class="phone-upload-body">
+      <div class="phone-qr-wrap">
+        <div class="phone-qr-loading" id="phoneQrLoading"><i class="ri-loader-4-line"></i><span>正在建立连接</span></div>
+        <img id="phoneQrImage" alt="手机传图二维码" style="display:none;">
       </div>
-      <div class="guide-step">
-        <div class="guide-step-num">2</div>
-        <div class="guide-step-content">
-          <div class="guide-step-title">安装快捷指令</div>
-          <div class="guide-step-desc">在 iPhone 上复制此链接在浏览器打开安装：<br><code>https://www.icloud.com/shortcuts/e6e454840f5b4efe9285b8454447a309</code></div>
-        </div>
-      </div>
-      <div class="guide-step">
-        <div class="guide-step-num">3</div>
-        <div class="guide-step-content">
-          <div class="guide-step-title">配置 Mac IP 地址</div>
-          <div class="guide-step-desc">打开快捷指令编辑，找到「文本」步骤，将 IP 地址改成第 1 步记下的地址</div>
-        </div>
-      </div>
-      <div class="guide-step">
-        <div class="guide-step-num">4</div>
-        <div class="guide-step-content">
-          <div class="guide-step-title">添加到控制中心</div>
-          <div class="guide-step-desc">iPhone 设置 → 控制中心 → 添加此快捷指令，下滑控制中心即可一键上传</div>
-        </div>
+      <div class="phone-upload-copy">
+        <div class="phone-upload-step"><span>1</span><p>用手机相机扫描二维码</p></div>
+        <div class="phone-upload-step"><span>2</span><p>在手机页面中多选照片并发送</p></div>
+        <div class="phone-upload-step"><span>3</span><p>图片会自动进入“新添加截图”</p></div>
+        <div class="phone-upload-live" id="phoneUploadLive"><i class="ri-wifi-line"></i><span>等待连接</span></div>
+        <button class="phone-upload-link" id="phoneUploadLink" onclick="copyPhoneUploadLink()" title="复制连接地址"></button>
       </div>
     </div>
-
-    <div class="guide-note">
-      <strong>提醒：</strong>Mac 和 iPhone 需要连接同一个 Wi-Fi 网络才能传输。
-    </div>
-
+    <div class="phone-upload-note" id="phoneUploadNote"><i class="ri-information-line"></i><span>二维码将在 30 分钟后失效，仅当前局域网内可以访问。</span></div>
     <div class="modal-actions">
+      <button class="btn btn-secondary btn-sm" onclick="renewPhoneUploadSession()"><i class="ri-refresh-line"></i>刷新二维码</button>
       <button class="btn btn-secondary btn-sm" onclick="hidePhoneGuide()">关闭</button>
     </div>
   </div>
 </div>
 
-  <script src="/static/app.js?v=151"></script>
+  <script src="/static/app.js?v=152"></script>
 </body>
 </html>

@@ -118,6 +118,10 @@ let state = {
   draftDimensions: [],
   draftScreenshotOrder: [],
   sequenceDragIndex: null,
+  mobileUploadToken: null,
+  mobileUploadPollTimer: null,
+  mobileUploadReceived: 0,
+  mobileUploadUrl: '',
 };
 
 // ── Init ─────────────────────────────────────────────────
@@ -2358,12 +2362,83 @@ function renderText(s) {
 
 // ── Phone Guide ────────────────────────────────────────────
 
-function showPhoneGuide() {
+async function showPhoneGuide() {
   document.getElementById('phoneGuideModal').style.display = 'flex';
+  await renewPhoneUploadSession();
 }
 
 function hidePhoneGuide() {
   document.getElementById('phoneGuideModal').style.display = 'none';
+  clearInterval(state.mobileUploadPollTimer);
+  state.mobileUploadPollTimer = null;
+  if (state.mobileUploadToken) {
+    fetch(`/api/mobile-upload/session/${state.mobileUploadToken}`, { method: 'DELETE' }).catch(() => {});
+    state.mobileUploadToken = null;
+  }
+}
+
+async function renewPhoneUploadSession() {
+  clearInterval(state.mobileUploadPollTimer);
+  if (state.mobileUploadToken) {
+    await fetch(`/api/mobile-upload/session/${state.mobileUploadToken}`, { method: 'DELETE' }).catch(() => {});
+  }
+  state.mobileUploadToken = null;
+  state.mobileUploadReceived = 0;
+  const image = document.getElementById('phoneQrImage');
+  const loading = document.getElementById('phoneQrLoading');
+  image.style.display = 'none';
+  loading.style.display = 'flex';
+  loading.innerHTML = '<i class="ri-loader-4-line"></i><span>正在建立连接</span>';
+  document.getElementById('phoneUploadLive').innerHTML = '<i class="ri-wifi-line"></i><span>等待连接</span>';
+  document.getElementById('phoneUploadLink').textContent = '';
+  try {
+    const response = await fetch('/api/mobile-upload/session', { method: 'POST' });
+    const data = await response.json();
+    if (!data.ok) throw new Error(data.error || '连接创建失败');
+    const session = data.session;
+    state.mobileUploadToken = session.token;
+    state.mobileUploadUrl = session.url;
+    image.src = `/api/mobile-upload/session/${session.token}/qr?t=${Date.now()}`;
+    image.onload = () => { loading.style.display = 'none'; image.style.display = 'block'; };
+    document.getElementById('phoneUploadLink').textContent = session.url.replace(/\?token=.*/, '');
+    state.mobileUploadPollTimer = setInterval(pollPhoneUploadSession, 1000);
+  } catch (error) {
+    loading.innerHTML = `<i class="ri-error-warning-line"></i><span>${escapeHtml(error.message)}</span>`;
+  }
+}
+
+async function pollPhoneUploadSession() {
+  if (!state.mobileUploadToken) return;
+  try {
+    const response = await fetch(`/api/mobile-upload/session/${state.mobileUploadToken}`);
+    const data = await response.json();
+    if (!data.ok) {
+      clearInterval(state.mobileUploadPollTimer);
+      document.getElementById('phoneUploadLive').innerHTML = '<i class="ri-time-line"></i><span>二维码已失效，请刷新</span>';
+      return;
+    }
+    const received = data.session.received || 0;
+    const live = document.getElementById('phoneUploadLive');
+    if (received > state.mobileUploadReceived) {
+      const added = received - state.mobileUploadReceived;
+      state.mobileUploadReceived = received;
+      live.classList.add('received');
+      live.innerHTML = `<i class="ri-checkbox-circle-line"></i><span>已收到 ${received} 张图片</span>`;
+      await Promise.all([loadStats(), loadScreenshots()]);
+      renderAppFilters();
+      showToast(`手机传来 ${added} 张图片`);
+    } else if (!received) {
+      live.innerHTML = '<i class="ri-wifi-line"></i><span>等待手机选择照片</span>';
+    }
+  } catch (error) {
+    document.getElementById('phoneUploadLive').innerHTML = '<i class="ri-wifi-off-line"></i><span>连接暂时中断</span>';
+  }
+}
+
+async function copyPhoneUploadLink() {
+  if (!state.mobileUploadUrl) return;
+  await navigator.clipboard.writeText(state.mobileUploadUrl);
+  showToast('手机上传地址已复制');
 }
 
 // ── Keyboard ─────────────────────────────────────────────
