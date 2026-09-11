@@ -13,7 +13,7 @@ struct AnalysisWorkspaceView: View {
                     }
                     Spacer()
                     Button("新建分析", systemImage: "plus") { }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.glassProminent)
                 }
 
                 ForEach(PreviewData.analyses) { item in
@@ -62,6 +62,7 @@ struct AnalysisWorkspaceView: View {
         .navigationTitle("分析")
         .toolbar {
             Button("AI 设置", systemImage: "gearshape") { }
+                .buttonStyle(.glass)
         }
     }
 }

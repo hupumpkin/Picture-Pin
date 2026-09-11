@@ -29,7 +29,7 @@ struct DesignPeekSidebar: View {
             Divider()
             sidebarFooter
         }
-        .background(.ultraThinMaterial)
+        .background(.thinMaterial)
     }
 
     private var brandHeader: some View {
@@ -136,7 +136,7 @@ struct DesignPeekSidebar: View {
     private var sidebarFooter: some View {
         VStack(spacing: 8) {
             Button("边逛边截", systemImage: "dot.viewfinder") { }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glassProminent)
                 .controlSize(.large)
                 .frame(maxWidth: .infinity)
 
@@ -144,7 +144,7 @@ struct DesignPeekSidebar: View {
                 Button("本地上传", systemImage: "square.and.arrow.down") { }
                 Button("AI 设置", systemImage: "sparkles") { }
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.glass)
             .font(.caption)
         }
         .padding(12)

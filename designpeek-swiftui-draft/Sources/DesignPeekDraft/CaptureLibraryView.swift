@@ -5,6 +5,7 @@ struct CaptureLibraryView: View {
     @Binding var selectedCaptures: Set<MockCapture.ID>
     @Binding var searchText: String
     @Binding var thumbnailSize: Double
+    @State private var previewCapture: MockCapture?
 
     private var title: String {
         switch selection {
@@ -19,57 +20,214 @@ struct CaptureLibraryView: View {
     }
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
-                ForEach(filteredCaptures) { capture in
-                    CaptureCard(
-                        capture: capture,
-                        isSelected: selectedCaptures.contains(capture.id)
-                    )
-                    .onTapGesture {
-                        if selectedCaptures.contains(capture.id) {
-                            selectedCaptures.remove(capture.id)
-                        } else {
-                            selectedCaptures.insert(capture.id)
+        ZStack(alignment: .bottom) {
+            ScrollView {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
+                    ForEach(filteredCaptures) { capture in
+                        CaptureCard(
+                            capture: capture,
+                            isSelected: selectedCaptures.contains(capture.id)
+                        )
+                        .onTapGesture {
+                            if selectedCaptures.contains(capture.id) {
+                                selectedCaptures.remove(capture.id)
+                            } else {
+                                selectedCaptures.insert(capture.id)
+                            }
+                        }
+                        .contextMenu {
+                            Button("查看大图", systemImage: "arrow.up.left.and.arrow.down.right") {
+                                previewCapture = capture
+                            }
+                            Button("收藏", systemImage: "star") { }
+                            Button("在 Finder 中显示", systemImage: "folder") { }
+                            Divider()
+                            Button("删除截图", systemImage: "trash", role: .destructive) { }
                         }
                     }
-                    .contextMenu {
-                        Button("查看大图", systemImage: "arrow.up.left.and.arrow.down.right") { }
-                        Button("收藏", systemImage: "star") { }
-                        Button("在 Finder 中显示", systemImage: "folder") { }
-                        Divider()
-                        Button("删除截图", systemImage: "trash", role: .destructive) { }
-                    }
                 }
+                .padding(24)
+                .padding(.bottom, 72)
             }
-            .padding(24)
+
+            LibraryGlassDock(
+                selectedCount: selectedCaptures.count,
+                thumbnailSize: $thumbnailSize,
+                onPreview: {
+                    previewCapture = PreviewData.captures.first {
+                        selectedCaptures.contains($0.id)
+                    }
+                },
+                onClear: { selectedCaptures.removeAll() }
+            )
+            .padding(.bottom, 18)
         }
         .navigationTitle(title)
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索截图文字、备注或文件夹")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if !selectedCaptures.isEmpty {
-                    Text("已选 \(selectedCaptures.count) 张")
-                        .foregroundStyle(.secondary)
-                    Button("加入素材文件夹", systemImage: "folder.badge.plus") { }
-                    Button("加入分析项目", systemImage: "sparkles.rectangle.stack") { }
-                }
+                Button("导入截图", systemImage: "square.and.arrow.down") { }
                 Button("批量管理", systemImage: "checkmark.circle") { }
             }
-
-            ToolbarItem(placement: .status) {
-                HStack(spacing: 6) {
-                    Image(systemName: "rectangle.grid.3x2")
-                    Slider(value: $thumbnailSize, in: 128...210)
-                        .frame(width: 92)
-                }
-            }
+        }
+        .sheet(item: $previewCapture) { capture in
+            CapturePreview(capture: capture)
+                .frame(minWidth: 760, minHeight: 620)
+                .presentationBackground(.clear)
         }
     }
 
     private var filteredCaptures: [MockCapture] {
         guard !searchText.isEmpty else { return PreviewData.captures }
         return PreviewData.captures.filter { $0.app.localizedCaseInsensitiveContains(searchText) }
+    }
+}
+
+private struct LibraryGlassDock: View {
+    let selectedCount: Int
+    @Binding var thumbnailSize: Double
+    let onPreview: () -> Void
+    let onClear: () -> Void
+
+    var body: some View {
+        GlassEffectContainer(spacing: 10) {
+            HStack(spacing: 12) {
+                if selectedCount == 0 {
+                    Label("调整缩略图", systemImage: "rectangle.grid.3x2")
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.secondary)
+                        .help("调整缩略图大小")
+
+                    Slider(value: $thumbnailSize, in: 128...210)
+                        .frame(width: 112)
+
+                    Divider()
+                        .frame(height: 18)
+
+                    Button("排序", systemImage: "arrow.up.arrow.down") { }
+                        .labelStyle(.iconOnly)
+                        .help("排序")
+                    Button("筛选", systemImage: "line.3.horizontal.decrease") { }
+                        .labelStyle(.iconOnly)
+                        .help("筛选")
+                } else {
+                    Text("已选 \(selectedCount) 张")
+                        .font(.callout.weight(.medium))
+
+                    Divider()
+                        .frame(height: 18)
+
+                    if selectedCount == 1 {
+                        Button("查看大图", systemImage: "arrow.up.left.and.arrow.down.right", action: onPreview)
+                            .labelStyle(.iconOnly)
+                            .help("查看大图")
+                    }
+
+                    Button("加入素材文件夹", systemImage: "folder.badge.plus") { }
+                        .labelStyle(.iconOnly)
+                        .help("加入素材文件夹")
+                    Button("加入分析项目", systemImage: "sparkles.rectangle.stack") { }
+                        .labelStyle(.iconOnly)
+                        .help("加入分析项目")
+                    Button("取消选择", systemImage: "xmark", action: onClear)
+                        .labelStyle(.iconOnly)
+                        .help("取消选择")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 18))
+        }
+    }
+}
+
+private struct CapturePreview: View {
+    let capture: MockCapture
+    @Environment(\.dismiss) private var dismiss
+    @State private var zoom = 1.0
+    @State private var rotation = 0.0
+    @State private var isFavorite = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.82)
+                .ignoresSafeArea()
+
+            MockScreenshotView(capture: capture)
+                .aspectRatio(0.54, contentMode: .fit)
+                .frame(maxWidth: 390, maxHeight: 500)
+                .scaleEffect(zoom)
+                .rotationEffect(.degrees(rotation))
+                .shadow(color: .black.opacity(0.42), radius: 32, y: 14)
+                .animation(.smooth(duration: 0.24), value: zoom)
+                .animation(.smooth(duration: 0.24), value: rotation)
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button("关闭", systemImage: "xmark") { dismiss() }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.glass)
+                        .controlSize(.large)
+                        .help("关闭")
+                }
+                .padding(20)
+
+                Spacer()
+
+                previewDock
+                    .padding(.bottom, 22)
+            }
+        }
+    }
+
+    private var previewDock: some View {
+        GlassEffectContainer(spacing: 10) {
+            HStack(spacing: 12) {
+                toolButton("缩小", systemImage: "minus.magnifyingglass") {
+                    zoom = max(0.6, zoom - 0.2)
+                }
+
+                Text("\(Int(zoom * 100))%")
+                    .font(.system(.caption, design: .monospaced).weight(.medium))
+                    .frame(width: 44)
+
+                toolButton("放大", systemImage: "plus.magnifyingglass") {
+                    zoom = min(1.8, zoom + 0.2)
+                }
+                toolButton("适合窗口", systemImage: "arrow.down.right.and.arrow.up.left") {
+                    zoom = 1
+                }
+
+                Divider()
+                    .frame(height: 20)
+
+                toolButton("向左旋转", systemImage: "rotate.left") {
+                    rotation -= 90
+                }
+                toolButton(isFavorite ? "取消收藏" : "收藏", systemImage: isFavorite ? "star.fill" : "star") {
+                    isFavorite.toggle()
+                }
+                toolButton("取色", systemImage: "eyedropper") { }
+                toolButton("分享", systemImage: "square.and.arrow.up") { }
+                toolButton("图片信息", systemImage: "info.circle") { }
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+        }
+    }
+
+    private func toolButton(
+        _ title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(title, systemImage: systemImage, action: action)
+            .labelStyle(.iconOnly)
+            .font(.system(size: 15, weight: .medium))
+            .help(title)
     }
 }
 

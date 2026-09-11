@@ -8,7 +8,7 @@ struct DesignPeekDraftApp: App {
                 .frame(minWidth: 1040, minHeight: 680)
         }
         .windowStyle(.titleBar)
-        .windowToolbarStyle(.unifiedCompact)
+        .windowToolbarStyle(.unified)
         .defaultSize(width: 1320, height: 840)
     }
 }
