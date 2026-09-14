@@ -6,6 +6,10 @@
   const MATERIAL_REFRESH_INTERVAL = 3500;
   const MIN_SCALE = 0.08;
   const MAX_SCALE = 5;
+  const PANEL_STORAGE_KEYS = {
+    material: 'dp_canvas_material_collapsed',
+    analysis: 'dp_canvas_analysis_collapsed',
+  };
 
   const workspaceState = {
     screenshots: [],
@@ -53,6 +57,10 @@
       'canvasStage', 'canvasEmptyState', 'canvasDropIndicator',
       'canvasSaveState', 'canvasZoomValue', 'canvasResetView',
       'canvasPhoneUpload', 'canvasLocalUpload', 'canvasUploadInput',
+      'canvasMaterialToggle', 'canvasAnalysisPanel', 'canvasAnalysisCount',
+      'canvasAnalysisSettings', 'canvasAnalysisToggle', 'canvasAnalysisHome',
+      'canvasAnalyzeSelection', 'canvasAnalysisNavHost', 'canvasAnalysisDetail',
+      'canvasAnalysisBack', 'canvasAnalysisToolbarHost', 'canvasAnalysisContentHost',
     ];
     ids.forEach(id => { dom[id] = document.getElementById(id); });
   }
@@ -80,6 +88,16 @@
     });
     dom.canvasLocalUpload.addEventListener('click', () => dom.canvasUploadInput.click());
     dom.canvasUploadInput.addEventListener('change', uploadLocalMaterials);
+    dom.canvasMaterialToggle.addEventListener('click', () => toggleFloatingPanel('material'));
+    dom.canvasAnalysisToggle.addEventListener('click', () => toggleFloatingPanel('analysis'));
+    dom.canvasAnalysisSettings.addEventListener('click', () => {
+      if (typeof showAISettings === 'function') showAISettings();
+    });
+    dom.canvasAnalysisBack.addEventListener('click', showAnalysisHome);
+    dom.canvasAnalyzeSelection.addEventListener('click', createAnalysisFromCanvasSelection);
+
+    restoreFloatingPanels();
+    setupAnalysisBridge();
 
     dom.canvasStageShell.addEventListener('dragover', event => {
       if (!hasScreenshotDrag(event)) return;
@@ -539,6 +557,7 @@
     workspaceState.transformer.nodes([node]);
     workspaceState.transformer.moveToTop();
     workspaceState.layer.batchDraw();
+    updateAnalyzeSelectionButton();
   }
 
   function clearCanvasSelection() {
@@ -546,6 +565,123 @@
     workspaceState.selectedNode = null;
     workspaceState.transformer.nodes([]);
     workspaceState.layer.batchDraw();
+    updateAnalyzeSelectionButton();
+  }
+
+  function toggleFloatingPanel(panelName, forceCollapsed = null) {
+    const panel = panelName === 'material'
+      ? document.querySelector('.material-panel')
+      : dom.canvasAnalysisPanel;
+    const button = panelName === 'material' ? dom.canvasMaterialToggle : dom.canvasAnalysisToggle;
+    if (!panel || !button) return;
+    const collapsed = forceCollapsed === null ? !panel.classList.contains('collapsed') : forceCollapsed;
+    panel.classList.toggle('collapsed', collapsed);
+    button.setAttribute('aria-expanded', String(!collapsed));
+    const actionLabel = collapsed ? `展开${panelName === 'material' ? '截图素材' : '分析'}` : `收起${panelName === 'material' ? '截图素材' : '分析'}`;
+    button.title = actionLabel;
+    button.setAttribute('aria-label', actionLabel);
+    const icon = button.querySelector('i');
+    if (icon) {
+      icon.className = panelName === 'material'
+        ? (collapsed ? 'ri-arrow-right-s-line' : 'ri-arrow-left-s-line')
+        : (collapsed ? 'ri-arrow-left-s-line' : 'ri-arrow-right-s-line');
+    }
+    localStorage.setItem(PANEL_STORAGE_KEYS[panelName], collapsed ? '1' : '0');
+  }
+
+  function restoreFloatingPanels() {
+    toggleFloatingPanel('material', localStorage.getItem(PANEL_STORAGE_KEYS.material) === '1');
+    toggleFloatingPanel('analysis', localStorage.getItem(PANEL_STORAGE_KEYS.analysis) === '1');
+  }
+
+  function setupAnalysisBridge() {
+    const nav = document.getElementById('tabSidebarProjects');
+    const toolbar = document.getElementById('projectToolbar');
+    const content = document.getElementById('projectContent');
+    if (!nav || !toolbar || !content) return;
+
+    nav.classList.add('active');
+    dom.canvasAnalysisNavHost.append(nav);
+    dom.canvasAnalysisToolbarHost.append(toolbar);
+    dom.canvasAnalysisContentHost.append(content);
+    dom.canvasAnalysisNavHost.addEventListener('click', event => {
+      if (event.target.closest('.analysis-folder-toggle, .project-nav-actions')) return;
+      if (event.target.closest('.analysis-nav-item, .analysis-folder-row, .analysis-section-heading')) {
+        window.setTimeout(showAnalysisDetail, 0);
+      }
+    });
+    dom.canvasAnalysisContentHost.addEventListener('click', event => {
+      if (event.target.closest('.conversation-list-card')) window.setTimeout(showAnalysisDetail, 0);
+    });
+
+    updateAnalysisCount();
+    window.setTimeout(() => {
+      if (typeof renderProjectNav === 'function') renderProjectNav();
+      updateAnalysisCount();
+      if (typeof state !== 'undefined' && (state.currentConversation || state.currentProject)) showAnalysisDetail();
+    }, 500);
+    window.setInterval(updateAnalysisCount, 3000);
+  }
+
+  function showAnalysisHome() {
+    dom.canvasAnalysisHome.hidden = false;
+    dom.canvasAnalysisDetail.hidden = true;
+    if (typeof backToProjectList === 'function') backToProjectList();
+    history.replaceState(null, '', '/');
+    updateAnalysisCount();
+  }
+
+  function showAnalysisDetail() {
+    dom.canvasAnalysisHome.hidden = true;
+    dom.canvasAnalysisDetail.hidden = false;
+    updateAnalysisCount();
+  }
+
+  function updateAnalysisCount() {
+    if (!dom.canvasAnalysisCount) return;
+    const count = typeof state !== 'undefined' && Array.isArray(state.conversations)
+      ? state.conversations.length
+      : 0;
+    dom.canvasAnalysisCount.textContent = `${count} 个分析`;
+  }
+
+  function updateAnalyzeSelectionButton() {
+    if (!dom.canvasAnalyzeSelection) return;
+    const node = workspaceState.selectedNode;
+    const label = dom.canvasAnalyzeSelection.querySelector('small');
+    dom.canvasAnalyzeSelection.disabled = !node;
+    if (!label) return;
+    if (!node) {
+      label.textContent = '请先在画布中选择一张图片';
+      return;
+    }
+    const screenshot = workspaceState.screenshotMap.get(node.getAttr('screenshotId'));
+    label.textContent = screenshot?.app || materialFolderName(screenshot || {}) || '已选择 1 张素材';
+  }
+
+  async function createAnalysisFromCanvasSelection() {
+    const node = workspaceState.selectedNode;
+    if (!node) return;
+    dom.canvasAnalyzeSelection.disabled = true;
+    try {
+      const response = await fetch('/api/conversations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ screenshot_ids: [node.getAttr('screenshotId')] }),
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || '无法创建分析');
+      if (typeof loadConversations === 'function') await loadConversations();
+      if (typeof selectConversation === 'function') selectConversation(result.conversation.id);
+      toggleFloatingPanel('analysis', false);
+      showAnalysisDetail();
+      workspaceToast('已创建分析，请填写你想研究的问题');
+    } catch (error) {
+      workspaceToast(error.message || '无法创建分析');
+    } finally {
+      updateAnalyzeSelectionButton();
+      updateAnalysisCount();
+    }
   }
 
   function removeSelectedCanvasImage() {

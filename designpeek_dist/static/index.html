@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
   <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
-  <link rel="stylesheet" href="/static/style.css?v=104">
+  <link rel="stylesheet" href="/static/style.css?v=105">
 </head>
 <body>
 <div class="canvas-workspace" id="canvasWorkspace">
@@ -34,7 +34,10 @@
   <aside class="material-panel" aria-label="截图素材">
     <header class="material-panel-header">
       <div><h1>截图素材</h1><span id="canvasMaterialCount">正在载入</span></div>
-      <button class="material-icon-button" id="canvasRefreshMaterials" title="刷新素材" aria-label="刷新素材"><i class="ri-refresh-line"></i></button>
+      <div class="floating-panel-actions">
+        <button class="material-icon-button" id="canvasRefreshMaterials" title="刷新素材" aria-label="刷新素材"><i class="ri-refresh-line"></i></button>
+        <button class="material-icon-button floating-panel-toggle" id="canvasMaterialToggle" title="收起截图素材" aria-label="收起截图素材" aria-expanded="true"><i class="ri-arrow-left-s-line"></i></button>
+      </div>
     </header>
     <div class="material-search">
       <i class="ri-search-line"></i>
@@ -61,6 +64,7 @@
         </div>
       </section>
     </div>
+    <div class="floating-panel-collapsed-label"><i class="ri-image-2-line"></i><span>截图</span></div>
   </aside>
 
   <main class="canvas-main">
@@ -96,6 +100,30 @@
       <div class="canvas-navigation-hint"><span>空白处拖动画布</span><span>滚轮缩放</span><span>Delete 删除图片</span></div>
     </div>
   </main>
+
+  <aside class="floating-analysis-panel" id="canvasAnalysisPanel" aria-label="分析工作区">
+    <header class="analysis-panel-header">
+      <div class="analysis-panel-heading"><i class="ri-sparkling-2-line"></i><div><h2>分析</h2><span id="canvasAnalysisCount">正在载入</span></div></div>
+      <div class="floating-panel-actions">
+        <button class="material-icon-button" id="canvasAnalysisSettings" title="AI 设置" aria-label="AI 设置"><i class="ri-settings-3-line"></i></button>
+        <button class="material-icon-button floating-panel-toggle" id="canvasAnalysisToggle" title="收起分析" aria-label="收起分析" aria-expanded="true"><i class="ri-arrow-right-s-line"></i></button>
+      </div>
+    </header>
+    <div class="analysis-panel-body">
+      <div class="analysis-panel-home" id="canvasAnalysisHome">
+        <button class="analysis-from-selection" id="canvasAnalyzeSelection" disabled>
+          <i class="ri-add-circle-line"></i><span><strong>用画布所选素材分析</strong><small>请先在画布中选择一张图片</small></span>
+        </button>
+        <div class="analysis-panel-nav-host" id="canvasAnalysisNavHost"></div>
+      </div>
+      <div class="analysis-panel-detail" id="canvasAnalysisDetail" hidden>
+        <button class="analysis-back-button" id="canvasAnalysisBack"><i class="ri-arrow-left-line"></i><span>返回分析列表</span></button>
+        <div id="canvasAnalysisToolbarHost"></div>
+        <div id="canvasAnalysisContentHost"></div>
+      </div>
+    </div>
+    <div class="floating-panel-collapsed-label"><i class="ri-sparkling-2-line"></i><span>分析</span></div>
+  </aside>
 </div>
 
 <div class="app legacy-app-shell" aria-hidden="true">
@@ -421,6 +449,6 @@
 
   <script src="/static/app.js?v=152"></script>
   <script src="/static/vendor/konva/konva.min.js?v=10.5.0"></script>
-  <script src="/static/canvas-workspace.js?v=1"></script>
+  <script src="/static/canvas-workspace.js?v=2"></script>
 </body>
 </html>
