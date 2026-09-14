@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import io
+import math
 import os
 import re
 import secrets
@@ -64,6 +65,7 @@ _ANALYSIS_WRITE_LOCK = threading.Lock()
 _PROJECTS_WRITE_LOCK = threading.Lock()
 _CONVERSATIONS_WRITE_LOCK = threading.Lock()
 _MOBILE_UPLOAD_LOCK = threading.Lock()
+_CANVASES_WRITE_LOCK = threading.Lock()
 _OCR_AVAILABLE = _PYOBJC_OCR_AVAILABLE or bool(shutil.which("swiftc") or shutil.which("xcrun"))
 _OCR_INDEX_STATE = {"running": False, "processed": 0, "total": 0, "error": None}
 _MOBILE_UPLOAD_SESSIONS = {}
@@ -158,6 +160,7 @@ STORAGE_LAYOUT_FILE = os.path.join(DATA_DIR, "storage_layout_v2.json")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif")
 CONVERSATIONS_FILE = os.path.join(DATA_DIR, "conversations.json")
 OBSERVATIONS_FILE = os.path.join(DATA_DIR, "screenshot_observations.json")
+CANVASES_FILE = os.path.join(DATA_DIR, "canvases.json")
 
 
 # ── ensure directories ──────────────────────────────────────────────
@@ -184,6 +187,97 @@ for local_file in (CONVERSATIONS_FILE, OBSERVATIONS_FILE):
     if not os.path.exists(local_file):
         with open(local_file, "w") as f:
             json.dump({}, f)
+
+
+def _default_canvas_document():
+    now = datetime.now().isoformat()
+    return {
+        "version": 1,
+        "active_canvas_id": "canvas_default",
+        "canvases": {
+            "canvas_default": {
+                "id": "canvas_default",
+                "name": "默认画布",
+                "created_at": now,
+                "updated_at": now,
+                "viewport": {"x": 0, "y": 0, "scale": 1},
+                "elements": [],
+            }
+        },
+    }
+
+
+def load_canvas_document():
+    if not os.path.exists(CANVASES_FILE):
+        return _default_canvas_document()
+    try:
+        with open(CANVASES_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("canvases"), dict):
+            raise ValueError("画布文件结构无效")
+        return data
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"  ⚠ 画布数据读取失败，使用空白默认画布: {exc}")
+        return _default_canvas_document()
+
+
+def save_canvas_document(data):
+    temp_path = f"{CANVASES_FILE}.tmp"
+    with open(temp_path, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_path, CANVASES_FILE)
+
+
+def _finite_number(value, default, minimum, maximum):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(minimum, min(maximum, number))
+
+
+def _sanitize_canvas(canvas_id, payload, existing=None):
+    existing = existing or {}
+    viewport = payload.get("viewport") if isinstance(payload.get("viewport"), dict) else {}
+    raw_elements = payload.get("elements") if isinstance(payload.get("elements"), list) else []
+    elements = []
+    seen_ids = set()
+    for raw in raw_elements[:2000]:
+        if not isinstance(raw, dict) or raw.get("type") != "image":
+            continue
+        element_id = str(raw.get("id") or "")[:100]
+        screenshot_id = str(raw.get("screenshot_id") or "")[:255]
+        if not element_id or not screenshot_id or element_id in seen_ids:
+            continue
+        seen_ids.add(element_id)
+        elements.append({
+            "id": element_id,
+            "type": "image",
+            "screenshot_id": screenshot_id,
+            "x": _finite_number(raw.get("x"), 0, -10_000_000, 10_000_000),
+            "y": _finite_number(raw.get("y"), 0, -10_000_000, 10_000_000),
+            "width": _finite_number(raw.get("width"), 240, 40, 20_000),
+            "height": _finite_number(raw.get("height"), 320, 40, 20_000),
+            "rotation": _finite_number(raw.get("rotation"), 0, -360, 360),
+            "z_index": int(_finite_number(raw.get("z_index"), len(elements), 0, 100_000)),
+        })
+    now = datetime.now().isoformat()
+    return {
+        "id": canvas_id,
+        "name": str(payload.get("name") or existing.get("name") or "默认画布")[:80],
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+        "viewport": {
+            "x": _finite_number(viewport.get("x"), 0, -10_000_000, 10_000_000),
+            "y": _finite_number(viewport.get("y"), 0, -10_000_000, 10_000_000),
+            "scale": _finite_number(viewport.get("scale"), 1, 0.05, 8),
+        },
+        "elements": elements,
+    }
 
 
 def load_analysis():
@@ -463,7 +557,6 @@ def migrate_to_material_folder_storage():
         )
     save_folders(folders)
     save_screenshot_metadata(metadata)
-    deleted_set = set(deleted)
     _remove_empty_screenshot_dirs()
     with open(STORAGE_LAYOUT_FILE, "w") as f:
         json.dump({"version": 2, "migrated_at": datetime.now().isoformat()}, f, ensure_ascii=False, indent=2)
@@ -836,6 +929,41 @@ async def api_list(limit: int = 200):
 
     results.sort(key=lambda x: x["mtime"], reverse=True)
     return results[:limit]
+
+
+# ── API: Canvas workspace ───────────────────────────────────────────
+
+@app.get("/api/canvases")
+async def api_list_canvases():
+    """Return the versioned multi-canvas document."""
+    return load_canvas_document()
+
+
+@app.get("/api/canvases/{canvas_id}")
+async def api_get_canvas(canvas_id: str):
+    document = load_canvas_document()
+    canvas = document.get("canvases", {}).get(canvas_id)
+    if canvas is None:
+        return JSONResponse({"ok": False, "error": "画布不存在"}, status_code=404)
+    return canvas
+
+
+@app.put("/api/canvases/{canvas_id}")
+async def api_save_canvas(canvas_id: str, req: Request):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", canvas_id):
+        return JSONResponse({"ok": False, "error": "画布 ID 不可用"}, status_code=400)
+    payload = await req.json()
+    if not isinstance(payload, dict):
+        return JSONResponse({"ok": False, "error": "画布数据无效"}, status_code=400)
+    with _CANVASES_WRITE_LOCK:
+        document = load_canvas_document()
+        existing = document.setdefault("canvases", {}).get(canvas_id)
+        canvas = _sanitize_canvas(canvas_id, payload, existing)
+        document["version"] = 1
+        document["active_canvas_id"] = canvas_id
+        document["canvases"][canvas_id] = canvas
+        save_canvas_document(document)
+    return {"ok": True, "canvas": canvas}
 
 
 # ── API: Classify screenshots ────────────────────────────────────────

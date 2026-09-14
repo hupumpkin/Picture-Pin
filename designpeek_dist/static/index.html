@@ -5,10 +5,100 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
   <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
-  <link rel="stylesheet" href="/static/style.css?v=103">
+  <link rel="stylesheet" href="/static/style.css?v=104">
 </head>
 <body>
-<div class="app">
+<div class="canvas-workspace" id="canvasWorkspace">
+  <nav class="source-rail" aria-label="素材来源">
+    <div class="source-brand" title="DesignPeek">
+      <span>DP</span>
+    </div>
+    <div class="source-list">
+      <button class="source-item active" data-source="screenshots" aria-pressed="true" title="截图素材">
+        <i class="ri-image-2-line"></i><span>截图</span>
+      </button>
+      <button class="source-item source-placeholder" data-source="huaban" aria-pressed="false" title="花瓣（即将支持）">
+        <i class="ri-palette-line"></i><span>花瓣</span><small>即将支持</small>
+      </button>
+      <button class="source-item source-placeholder" data-source="zcool" aria-pressed="false" title="站酷（即将支持）">
+        <i class="ri-shape-2-line"></i><span>站酷</span><small>即将支持</small>
+      </button>
+    </div>
+    <div class="source-rail-actions">
+      <button class="rail-action" id="canvasPhoneUpload" title="手机传图" aria-label="手机传图"><i class="ri-qr-code-line"></i></button>
+      <button class="rail-action" id="canvasLocalUpload" title="本地上传" aria-label="本地上传"><i class="ri-upload-2-line"></i></button>
+      <input type="file" id="canvasUploadInput" accept="image/*" multiple hidden>
+    </div>
+  </nav>
+
+  <aside class="material-panel" aria-label="截图素材">
+    <header class="material-panel-header">
+      <div><h1>截图素材</h1><span id="canvasMaterialCount">正在载入</span></div>
+      <button class="material-icon-button" id="canvasRefreshMaterials" title="刷新素材" aria-label="刷新素材"><i class="ri-refresh-line"></i></button>
+    </header>
+    <div class="material-search">
+      <i class="ri-search-line"></i>
+      <input id="canvasMaterialSearch" type="search" placeholder="搜索素材文字、文件夹…" autocomplete="off">
+      <button id="canvasClearSearch" title="清除搜索" aria-label="清除搜索" hidden><i class="ri-close-line"></i></button>
+    </div>
+    <div class="material-panel-scroll">
+      <section class="material-filters" aria-label="素材分类">
+        <button class="material-filter active" data-filter="inbox"><span><i class="ri-inbox-archive-line"></i>新添加截图</span><b id="canvasInboxCount">0</b></button>
+        <button class="material-filter" data-filter="favorites"><span><i class="ri-heart-3-line"></i>已收藏</span><b id="canvasFavoriteCount">0</b></button>
+      </section>
+      <section class="material-folder-section">
+        <div class="material-section-title"><span>素材文件夹</span><small>拖入画布使用</small></div>
+        <div class="material-folder-list" id="canvasFolderList"></div>
+      </section>
+      <section class="material-library-section">
+        <div class="material-library-head">
+          <strong id="canvasMaterialTitle">新添加截图</strong>
+          <span id="canvasVisibleCount">0 张</span>
+        </div>
+        <div class="material-grid" id="canvasMaterialGrid"></div>
+        <div class="material-empty" id="canvasMaterialEmpty" hidden>
+          <i class="ri-image-line"></i><strong>这里还没有素材</strong><span>上传截图后即可拖入画布</span>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <main class="canvas-main">
+    <header class="canvas-topbar">
+      <div class="canvas-document-title">
+        <i class="ri-layout-masonry-line"></i>
+        <div><strong>默认画布</strong><span>所有改动自动保存</span></div>
+      </div>
+      <div class="canvas-save-state" id="canvasSaveState"><i class="ri-checkbox-circle-line"></i><span>已保存</span></div>
+      <button class="canvas-topbar-button" id="canvasResetView" title="回到画布内容"><i class="ri-focus-3-line"></i><span>定位内容</span></button>
+    </header>
+    <div class="canvas-stage-shell" id="canvasStageShell">
+      <div class="canvas-grid-layer"></div>
+      <div id="canvasStage" class="canvas-stage"></div>
+      <div class="canvas-empty-state" id="canvasEmptyState">
+        <i class="ri-drag-drop-line"></i>
+        <strong>把灵感拖到这里</strong>
+        <span>从左侧拖入截图，开始整理你的默认画布</span>
+      </div>
+      <div class="canvas-drop-indicator" id="canvasDropIndicator"><i class="ri-add-circle-line"></i><span>松开以放入画布</span></div>
+      <div class="canvas-placeholder-toolbar" aria-label="画布工具栏占位">
+        <button class="active" disabled title="选择工具（后续开放）"><i class="ri-cursor-line"></i></button>
+        <button disabled title="手型工具（后续开放）"><i class="ri-hand"></i></button>
+        <span></span>
+        <button disabled title="缩小（后续开放）"><i class="ri-subtract-line"></i></button>
+        <output id="canvasZoomValue">100%</output>
+        <button disabled title="放大（后续开放）"><i class="ri-add-line"></i></button>
+        <button disabled title="适合画布（后续开放）"><i class="ri-fullscreen-line"></i></button>
+        <span></span>
+        <button disabled title="撤销（后续开放）"><i class="ri-arrow-go-back-line"></i></button>
+        <button disabled title="重做（后续开放）"><i class="ri-arrow-go-forward-line"></i></button>
+      </div>
+      <div class="canvas-navigation-hint"><span>空白处拖动画布</span><span>滚轮缩放</span><span>Delete 删除图片</span></div>
+    </div>
+  </main>
+</div>
+
+<div class="app legacy-app-shell" aria-hidden="true">
 
 <!-- Sidebar -->
 <aside class="sidebar">
@@ -330,5 +420,7 @@
 </div>
 
   <script src="/static/app.js?v=152"></script>
+  <script src="/static/vendor/konva/konva.min.js?v=10.5.0"></script>
+  <script src="/static/canvas-workspace.js?v=1"></script>
 </body>
 </html>
