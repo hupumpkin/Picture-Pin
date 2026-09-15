@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
   <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
-  <link rel="stylesheet" href="/static/style.css?v=105">
+  <link rel="stylesheet" href="/static/style.css?v=106">
 </head>
 <body>
 <div class="canvas-workspace" id="canvasWorkspace">
@@ -17,8 +17,8 @@
       <button class="source-item active" data-source="screenshots" aria-pressed="true" title="截图素材">
         <i class="ri-image-2-line"></i><span>截图</span>
       </button>
-      <button class="source-item source-placeholder" data-source="huaban" aria-pressed="false" title="花瓣（即将支持）">
-        <i class="ri-palette-line"></i><span>花瓣</span><small>即将支持</small>
+      <button class="source-item" data-source="huaban" aria-pressed="false" title="花瓣浏览">
+        <i class="ri-palette-line"></i><span>花瓣</span>
       </button>
       <button class="source-item source-placeholder" data-source="zcool" aria-pressed="false" title="站酷（即将支持）">
         <i class="ri-shape-2-line"></i><span>站酷</span><small>即将支持</small>
@@ -65,6 +65,25 @@
       </section>
     </div>
     <div class="floating-panel-collapsed-label"><i class="ri-image-2-line"></i><span>截图</span></div>
+  </aside>
+
+  <aside class="huaban-panel" id="canvasHuabanPanel" aria-label="花瓣浏览" hidden>
+    <header class="material-panel-header">
+      <div><h1>花瓣</h1><span id="canvasHuabanStatus">登录、搜索、浏览都在这个窗口里完成</span></div>
+      <div class="floating-panel-actions">
+        <button class="material-icon-button" id="canvasHuabanReload" title="重新加载花瓣" aria-label="重新加载花瓣"><i class="ri-refresh-line"></i></button>
+        <button class="material-icon-button" id="canvasHuabanOpen" title="在新标签页打开花瓣" aria-label="在新标签页打开花瓣"><i class="ri-external-link-line"></i></button>
+        <button class="material-icon-button floating-panel-toggle" id="canvasHuabanToggle" title="收起花瓣" aria-label="收起花瓣" aria-expanded="true"><i class="ri-arrow-left-s-line"></i></button>
+      </div>
+    </header>
+    <div class="huaban-hint">
+      <i class="ri-file-copy-line"></i>
+      <span>在花瓣里右键复制图片，点一下画布空白处，再按 <kbd>⌘</kbd><kbd>V</kbd></span>
+    </div>
+    <div class="huaban-frame-wrap" id="canvasHuabanFrameWrap">
+      <div class="huaban-frame-status" id="canvasHuabanLoading"><i class="ri-loader-4-line"></i><span>正在加载花瓣…</span></div>
+    </div>
+    <div class="floating-panel-collapsed-label"><i class="ri-palette-line"></i><span>花瓣</span></div>
   </aside>
 
   <main class="canvas-main">
@@ -449,6 +468,6 @@
 
   <script src="/static/app.js?v=152"></script>
   <script src="/static/vendor/konva/konva.min.js?v=10.5.0"></script>
-  <script src="/static/canvas-workspace.js?v=2"></script>
+  <script src="/static/canvas-workspace.js?v=3"></script>
 </body>
 </html>

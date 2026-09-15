@@ -6,8 +6,11 @@
   const MATERIAL_REFRESH_INTERVAL = 3500;
   const MIN_SCALE = 0.08;
   const MAX_SCALE = 5;
+  const HUABAN_URL = 'https://huaban.com/';
+  const SOURCE_STORAGE_KEY = 'dp_canvas_active_source';
   const PANEL_STORAGE_KEYS = {
     material: 'dp_canvas_material_collapsed',
+    huaban: 'dp_canvas_huaban_collapsed',
     analysis: 'dp_canvas_analysis_collapsed',
   };
 
@@ -29,6 +32,9 @@
     panning: false,
     panOrigin: null,
     materialSignature: '',
+    source: 'screenshots',
+    huabanFrame: null,
+    pasting: false,
   };
 
   const dom = {};
@@ -61,16 +67,16 @@
       'canvasAnalysisSettings', 'canvasAnalysisToggle', 'canvasAnalysisHome',
       'canvasAnalyzeSelection', 'canvasAnalysisNavHost', 'canvasAnalysisDetail',
       'canvasAnalysisBack', 'canvasAnalysisToolbarHost', 'canvasAnalysisContentHost',
+      'canvasHuabanPanel', 'canvasHuabanStatus', 'canvasHuabanReload',
+      'canvasHuabanOpen', 'canvasHuabanToggle', 'canvasHuabanLoading',
+      'canvasHuabanFrameWrap',
     ];
     ids.forEach(id => { dom[id] = document.getElementById(id); });
   }
 
   function bindWorkspaceEvents() {
     document.querySelectorAll('.source-item').forEach(button => {
-      button.addEventListener('click', () => {
-        if (button.dataset.source === 'screenshots') return;
-        workspaceToast(`${button.querySelector('span').textContent}素材源将在后续版本接入`);
-      });
+      button.addEventListener('click', () => selectWorkspaceSource(button.dataset.source));
     });
 
     document.querySelectorAll('.material-filter').forEach(button => {
@@ -95,8 +101,13 @@
     });
     dom.canvasAnalysisBack.addEventListener('click', showAnalysisHome);
     dom.canvasAnalyzeSelection.addEventListener('click', createAnalysisFromCanvasSelection);
+    dom.canvasHuabanReload.addEventListener('click', () => loadHuabanFrame(true));
+    dom.canvasHuabanOpen.addEventListener('click', () => window.open(HUABAN_URL, '_blank', 'noopener'));
+    dom.canvasHuabanToggle.addEventListener('click', () => toggleFloatingPanel('huaban'));
+    document.addEventListener('paste', handleWorkspacePaste);
 
     restoreFloatingPanels();
+    restoreWorkspaceSource();
     setupAnalysisBridge();
 
     dom.canvasStageShell.addEventListener('dragover', event => {
@@ -124,6 +135,53 @@
     }, true);
 
     window.addEventListener('beforeunload', flushCanvasSave);
+  }
+
+  function selectWorkspaceSource(source) {
+    if (source !== 'screenshots' && source !== 'huaban') {
+      workspaceToast('站酷素材源将在后续版本接入');
+      return;
+    }
+    workspaceState.source = source;
+    document.querySelectorAll('.source-item').forEach(button => {
+      const active = button.dataset.source === source;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    const materialPanel = document.querySelector('.material-panel');
+    if (materialPanel) materialPanel.hidden = source === 'huaban';
+    dom.canvasHuabanPanel.hidden = source !== 'huaban';
+    try { localStorage.setItem(SOURCE_STORAGE_KEY, source); } catch (_) {}
+    if (source === 'huaban') ensureHuabanFrame();
+  }
+
+  function restoreWorkspaceSource() {
+    let stored = null;
+    try { stored = localStorage.getItem(SOURCE_STORAGE_KEY); } catch (_) {}
+    selectWorkspaceSource(stored === 'huaban' ? 'huaban' : 'screenshots');
+  }
+
+  // 花瓣只在用户第一次点开时才加载，避免每次打开 Pin 都请求外部站点。
+  function ensureHuabanFrame() {
+    if (!workspaceState.huabanFrame) {
+      const frame = document.createElement('iframe');
+      frame.className = 'huaban-frame';
+      frame.title = '花瓣';
+      // 只放开写入权限：花瓣页面要能响应「复制图片」，但不该读取用户剪贴板。
+      frame.setAttribute('allow', 'clipboard-write; fullscreen');
+      frame.addEventListener('load', () => { dom.canvasHuabanLoading.hidden = true; });
+      workspaceState.huabanFrame = frame;
+      loadHuabanFrame();
+      dom.canvasHuabanFrameWrap.append(frame);
+    }
+  }
+
+  function loadHuabanFrame(isReload = false) {
+    const frame = workspaceState.huabanFrame;
+    if (!frame) return;
+    dom.canvasHuabanLoading.hidden = false;
+    frame.src = HUABAN_URL;
+    if (isReload) workspaceToast('已重新加载花瓣');
   }
 
   async function loadMaterials(showFeedback = false) {
@@ -341,6 +399,73 @@
     dom.canvasLocalUpload.disabled = false;
     await loadMaterials();
     workspaceToast(uploaded === files.length ? `已上传 ${uploaded} 张素材` : `已上传 ${uploaded}/${files.length} 张素材`);
+  }
+
+  const PASTED_EXTENSIONS = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif',
+    'image/webp': 'webp', 'image/bmp': 'bmp', 'image/tiff': 'tiff',
+  };
+
+  async function handleWorkspacePaste(event) {
+    if (workspaceState.source !== 'huaban') return;
+    const target = event.target;
+    if (target && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+    const item = Array.from(event.clipboardData?.items || [])
+      .find(entry => entry.kind === 'file' && entry.type.startsWith('image/'));
+    if (!item) {
+      workspaceToast('剪贴板里没有图片，请先在花瓣里右键复制图片');
+      return;
+    }
+    const blob = item.getAsFile();
+    if (!blob) {
+      workspaceToast('读不到剪贴板里的图片，请重新复制一次');
+      return;
+    }
+    event.preventDefault();
+    await pasteImageToCanvas(blob);
+  }
+
+  async function pasteImageToCanvas(blob) {
+    if (workspaceState.pasting) return;
+    workspaceState.pasting = true;
+    try {
+      const form = new FormData();
+      form.append('file', new File([blob], pastedFileName(blob), { type: blob.type || 'image/png' }));
+      const response = await fetch('/api/upload', { method: 'POST', body: form });
+      const result = await response.json();
+      if (!response.ok || !result.ok) throw new Error(result.error || '图片保存失败');
+      await loadMaterials();
+      const screenshot = findUploadedScreenshot(result.filename);
+      if (!screenshot) throw new Error('图片已保存，但暂时读不到这张素材');
+      await addCanvasImage(screenshot, canvasViewportCenter());
+      workspaceToast('已粘贴到画布，并放进「新添加截图」');
+    } catch (error) {
+      workspaceToast(error.message || '粘贴失败，请重试');
+    } finally {
+      workspaceState.pasting = false;
+    }
+  }
+
+  function pastedFileName(blob) {
+    const extension = PASTED_EXTENSIONS[blob.type] || 'png';
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    return `huaban_${stamp}_${Math.random().toString(16).slice(2, 8)}.${extension}`;
+  }
+
+  function findUploadedScreenshot(filename) {
+    if (!filename) return null;
+    const stem = String(filename).replace(/\.[^.]+$/, '');
+    return workspaceState.screenshots.find(item => item.id === stem)
+      || workspaceState.screenshots.find(item => String(item.path).endsWith(`/${filename}`))
+      || null;
+  }
+
+  function canvasViewportCenter() {
+    const stage = workspaceState.stage;
+    return {
+      x: (stage.width() / 2 - stage.x()) / stage.scaleX(),
+      y: (stage.height() / 2 - stage.y()) / stage.scaleY(),
+    };
   }
 
   function initStage() {
@@ -568,30 +693,39 @@
     updateAnalyzeSelectionButton();
   }
 
+  const PANEL_CONFIG = {
+    material: { label: '截图素材', onLeft: true, panel: () => document.querySelector('.material-panel'), button: () => dom.canvasMaterialToggle },
+    huaban: { label: '花瓣', onLeft: true, panel: () => dom.canvasHuabanPanel, button: () => dom.canvasHuabanToggle },
+    analysis: { label: '分析', onLeft: false, panel: () => dom.canvasAnalysisPanel, button: () => dom.canvasAnalysisToggle },
+  };
+
   function toggleFloatingPanel(panelName, forceCollapsed = null) {
-    const panel = panelName === 'material'
-      ? document.querySelector('.material-panel')
-      : dom.canvasAnalysisPanel;
-    const button = panelName === 'material' ? dom.canvasMaterialToggle : dom.canvasAnalysisToggle;
+    const config = PANEL_CONFIG[panelName];
+    if (!config) return;
+    const panel = config.panel();
+    const button = config.button();
     if (!panel || !button) return;
     const collapsed = forceCollapsed === null ? !panel.classList.contains('collapsed') : forceCollapsed;
     panel.classList.toggle('collapsed', collapsed);
     button.setAttribute('aria-expanded', String(!collapsed));
-    const actionLabel = collapsed ? `展开${panelName === 'material' ? '截图素材' : '分析'}` : `收起${panelName === 'material' ? '截图素材' : '分析'}`;
+    const actionLabel = `${collapsed ? '展开' : '收起'}${config.label}`;
     button.title = actionLabel;
     button.setAttribute('aria-label', actionLabel);
     const icon = button.querySelector('i');
     if (icon) {
-      icon.className = panelName === 'material'
-        ? (collapsed ? 'ri-arrow-right-s-line' : 'ri-arrow-left-s-line')
-        : (collapsed ? 'ri-arrow-left-s-line' : 'ri-arrow-right-s-line');
+      const pointsRight = config.onLeft ? collapsed : !collapsed;
+      icon.className = pointsRight ? 'ri-arrow-right-s-line' : 'ri-arrow-left-s-line';
     }
-    localStorage.setItem(PANEL_STORAGE_KEYS[panelName], collapsed ? '1' : '0');
+    try { localStorage.setItem(PANEL_STORAGE_KEYS[panelName], collapsed ? '1' : '0'); } catch (_) {}
   }
 
   function restoreFloatingPanels() {
-    toggleFloatingPanel('material', localStorage.getItem(PANEL_STORAGE_KEYS.material) === '1');
-    toggleFloatingPanel('analysis', localStorage.getItem(PANEL_STORAGE_KEYS.analysis) === '1');
+    const stored = name => {
+      try { return localStorage.getItem(PANEL_STORAGE_KEYS[name]) === '1'; } catch (_) { return false; }
+    };
+    toggleFloatingPanel('material', stored('material'));
+    toggleFloatingPanel('huaban', stored('huaban'));
+    toggleFloatingPanel('analysis', stored('analysis'));
   }
 
   function setupAnalysisBridge() {
