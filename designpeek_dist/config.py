@@ -2,7 +2,8 @@ import os
 
 # Server
 HOST = "0.0.0.0"
-PORT = 8765
+# CC worktrees can run beside the original Pin instance without sharing a port.
+PORT = int(os.environ.get("PIN_PORT", "8765"))
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
