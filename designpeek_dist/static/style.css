@@ -138,7 +138,9 @@ body {
   left: calc(var(--rail-width) + 14px);
   z-index: 3;
   display: flex;
-  width: var(--library-width);
+  /* 用户拖动过就用 --left-panel-width，否则回落到来源自己的默认宽度。 */
+  width: var(--left-panel-width, var(--library-width));
+  max-width: calc(100vw - var(--rail-width) - 28px);
   min-width: 0;
   flex-direction: column;
   overflow: hidden;
@@ -235,7 +237,8 @@ body {
 .material-library-head { padding: 0 0 10px; }
 .material-library-head strong { color: #3a3b38; font-size: 11px; font-weight: 600; }
 .material-library-head span { color: #999a95; font-size: 10px; }
-.material-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 10px; align-items: start; }
+/* 列数跟着面板宽度走：默认宽度下是 2 列，拖宽后自动增加列数。 */
+.material-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 12px 10px; align-items: start; }
 
 .material-thumb {
   position: relative;
@@ -464,6 +467,40 @@ body {
 }
 .floating-panel-collapsed-label i { font-size: 17px; }
 
+/* ── 左侧面板拖拽调宽 ─────────────────────────────────── */
+
+.panel-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.panel-resize-handle::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  content: "";
+  transition: background 0.15s ease;
+}
+.panel-resize-handle:hover::after,
+.panel-resize-handle:focus-visible::after,
+body.resizing-left-panel .panel-resize-handle::after { background: #b4b5b0; }
+.panel-resize-handle:focus-visible { outline: none; }
+.material-panel.collapsed .panel-resize-handle,
+.huaban-panel.collapsed .panel-resize-handle { display: none; }
+
+/* 拖动时锁住光标、关掉宽度过渡，并让 iframe 不再抢走指针事件。 */
+body.resizing-left-panel { cursor: col-resize; user-select: none; }
+body.resizing-left-panel .huaban-frame { pointer-events: none; }
+body.resizing-left-panel .material-panel,
+body.resizing-left-panel .huaban-panel { transition: none; }
+
 /* ── 花瓣内嵌浏览 ─────────────────────────────────────── */
 
 .huaban-panel {
@@ -473,7 +510,7 @@ body {
   left: calc(var(--rail-width) + 14px);
   z-index: 3;
   display: flex;
-  width: var(--huaban-width);
+  width: var(--left-panel-width, var(--huaban-width));
   max-width: calc(100vw - var(--rail-width) - 28px);
   min-width: 0;
   flex-direction: column;

@@ -8,6 +8,11 @@
   const MAX_SCALE = 5;
   const HUABAN_URL = 'https://huaban.com/';
   const SOURCE_STORAGE_KEY = 'dp_canvas_active_source';
+  const LEFT_PANEL_STORAGE_KEY = 'dp_canvas_left_panel_width';
+  const LEFT_PANEL_MIN = 240;
+  const LEFT_PANEL_MAX = 960;
+  const LEFT_PANEL_GAP = 24;      // 拖到最宽时，与右侧分析面板之间保留的间距
+  const LEFT_PANEL_STEP = 16;     // 键盘方向键每次调整的宽度
   const PANEL_STORAGE_KEYS = {
     material: 'dp_canvas_material_collapsed',
     huaban: 'dp_canvas_huaban_collapsed',
@@ -35,6 +40,7 @@
     source: 'screenshots',
     huabanFrame: null,
     pasting: false,
+    leftPanelWidth: null,
   };
 
   const dom = {};
@@ -69,7 +75,7 @@
       'canvasAnalysisBack', 'canvasAnalysisToolbarHost', 'canvasAnalysisContentHost',
       'canvasHuabanPanel', 'canvasHuabanStatus', 'canvasHuabanReload',
       'canvasHuabanOpen', 'canvasHuabanToggle', 'canvasHuabanLoading',
-      'canvasHuabanFrameWrap',
+      'canvasHuabanFrameWrap', 'canvasMaterialResize', 'canvasHuabanResize',
     ];
     ids.forEach(id => { dom[id] = document.getElementById(id); });
   }
@@ -105,9 +111,17 @@
     dom.canvasHuabanOpen.addEventListener('click', () => window.open(HUABAN_URL, '_blank', 'noopener'));
     dom.canvasHuabanToggle.addEventListener('click', () => toggleFloatingPanel('huaban'));
     document.addEventListener('paste', handleWorkspacePaste);
+    bindPanelResize(dom.canvasMaterialResize);
+    bindPanelResize(dom.canvasHuabanResize);
+    // 用 ResizeObserver 而不是 window.resize：前者在布局完成后再回调，
+    // 拿到的面板位置才是新断点下的值。
+    const widthObserver = new ResizeObserver(renderLeftPanelWidth);
+    widthObserver.observe(document.querySelector('.canvas-workspace'));
+    widthObserver.observe(dom.canvasAnalysisPanel);
 
     restoreFloatingPanels();
     restoreWorkspaceSource();
+    restoreLeftPanelWidth();
     setupAnalysisBridge();
 
     dom.canvasStageShell.addEventListener('dragover', event => {
@@ -153,6 +167,7 @@
     dom.canvasHuabanPanel.hidden = source !== 'huaban';
     try { localStorage.setItem(SOURCE_STORAGE_KEY, source); } catch (_) {}
     if (source === 'huaban') ensureHuabanFrame();
+    renderLeftPanelWidth();
   }
 
   function restoreWorkspaceSource() {
@@ -182,6 +197,98 @@
     dom.canvasHuabanLoading.hidden = false;
     frame.src = HUABAN_URL;
     if (isReload) workspaceToast('已重新加载花瓣');
+  }
+
+  function activeLeftPanel() {
+    return workspaceState.source === 'huaban'
+      ? dom.canvasHuabanPanel
+      : document.querySelector('.material-panel');
+  }
+
+  // 最宽不能压到右侧分析面板，留出 LEFT_PANEL_GAP 的间距。
+  function maxLeftPanelWidth() {
+    const panel = activeLeftPanel();
+    if (!panel || !dom.canvasAnalysisPanel) return LEFT_PANEL_MAX;
+    const available = dom.canvasAnalysisPanel.getBoundingClientRect().left
+      - panel.getBoundingClientRect().left - LEFT_PANEL_GAP;
+    if (!Number.isFinite(available)) return LEFT_PANEL_MAX;
+    return clamp(available, LEFT_PANEL_MIN, LEFT_PANEL_MAX);
+  }
+
+  function setLeftPanelWidth(width, persist = false) {
+    workspaceState.leftPanelWidth = clamp(width, LEFT_PANEL_MIN, maxLeftPanelWidth());
+    renderLeftPanelWidth();
+    if (!persist) return;
+    try {
+      localStorage.setItem(LEFT_PANEL_STORAGE_KEY, String(Math.round(workspaceState.leftPanelWidth)));
+    } catch (_) {}
+  }
+
+  // 窗口变窄时只收窄渲染宽度，用户原本设定的宽度留着，窗口恢复后还会回来。
+  function renderLeftPanelWidth() {
+    const workspace = document.querySelector('.canvas-workspace');
+    if (!workspace || workspaceState.leftPanelWidth === null) return;
+    const width = Math.min(workspaceState.leftPanelWidth, maxLeftPanelWidth());
+    workspace.style.setProperty('--left-panel-width', `${Math.round(width)}px`);
+  }
+
+  function resetLeftPanelWidth() {
+    workspaceState.leftPanelWidth = null;
+    const workspace = document.querySelector('.canvas-workspace');
+    if (workspace) workspace.style.removeProperty('--left-panel-width');
+    try { localStorage.removeItem(LEFT_PANEL_STORAGE_KEY); } catch (_) {}
+  }
+
+  function restoreLeftPanelWidth() {
+    let stored = NaN;
+    try { stored = Number(localStorage.getItem(LEFT_PANEL_STORAGE_KEY)); } catch (_) {}
+    if (!Number.isFinite(stored) || stored <= 0) return;
+    workspaceState.leftPanelWidth = clamp(stored, LEFT_PANEL_MIN, LEFT_PANEL_MAX);
+    renderLeftPanelWidth();
+  }
+
+  function bindPanelResize(handle) {
+    if (!handle) return;
+    const panel = handle.closest('.material-panel, .huaban-panel');
+    if (!panel) return;
+
+    handle.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || panel.classList.contains('collapsed')) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = panel.getBoundingClientRect().width;
+      let dragged = false;
+      handle.setPointerCapture(event.pointerId);
+      document.body.classList.add('resizing-left-panel');
+
+      const onMove = moveEvent => {
+        dragged = true;
+        setLeftPanelWidth(startWidth + moveEvent.clientX - startX);
+      };
+      const onEnd = endEvent => {
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onEnd);
+        handle.removeEventListener('pointercancel', onEnd);
+        document.body.classList.remove('resizing-left-panel');
+        if (handle.hasPointerCapture(endEvent.pointerId)) handle.releasePointerCapture(endEvent.pointerId);
+        if (dragged) setLeftPanelWidth(workspaceState.leftPanelWidth, true);
+      };
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onEnd);
+      handle.addEventListener('pointercancel', onEnd);
+    });
+
+    handle.addEventListener('dblclick', resetLeftPanelWidth);
+
+    handle.addEventListener('keydown', event => {
+      const current = workspaceState.leftPanelWidth ?? panel.getBoundingClientRect().width;
+      const step = event.shiftKey ? LEFT_PANEL_STEP * 3 : LEFT_PANEL_STEP;
+      if (event.key === 'ArrowLeft') setLeftPanelWidth(current - step, true);
+      else if (event.key === 'ArrowRight') setLeftPanelWidth(current + step, true);
+      else if (event.key === 'Enter' || event.key === 'Home') resetLeftPanelWidth();
+      else return;
+      event.preventDefault();
+    });
   }
 
   async function loadMaterials(showFeedback = false) {
@@ -717,6 +824,8 @@
       icon.className = pointsRight ? 'ri-arrow-right-s-line' : 'ri-arrow-left-s-line';
     }
     try { localStorage.setItem(PANEL_STORAGE_KEYS[panelName], collapsed ? '1' : '0'); } catch (_) {}
+    // 分析面板宽度变了，左侧面板的可拖范围也跟着变。
+    if (panelName === 'analysis') renderLeftPanelWidth();
   }
 
   function restoreFloatingPanels() {

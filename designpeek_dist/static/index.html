@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
   <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
-  <link rel="stylesheet" href="/static/style.css?v=106">
+  <link rel="stylesheet" href="/static/style.css?v=107">
 </head>
 <body>
 <div class="canvas-workspace" id="canvasWorkspace">
@@ -64,6 +64,7 @@
         </div>
       </section>
     </div>
+    <div class="panel-resize-handle" id="canvasMaterialResize" role="separator" aria-orientation="vertical" aria-label="拖动调整素材区宽度，双击恢复默认" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
     <div class="floating-panel-collapsed-label"><i class="ri-image-2-line"></i><span>截图</span></div>
   </aside>
 
@@ -83,6 +84,7 @@
     <div class="huaban-frame-wrap" id="canvasHuabanFrameWrap">
       <div class="huaban-frame-status" id="canvasHuabanLoading"><i class="ri-loader-4-line"></i><span>正在加载花瓣…</span></div>
     </div>
+    <div class="panel-resize-handle" id="canvasHuabanResize" role="separator" aria-orientation="vertical" aria-label="拖动调整花瓣区宽度，双击恢复默认" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
     <div class="floating-panel-collapsed-label"><i class="ri-palette-line"></i><span>花瓣</span></div>
   </aside>
 
@@ -468,6 +470,6 @@
 
   <script src="/static/app.js?v=152"></script>
   <script src="/static/vendor/konva/konva.min.js?v=10.5.0"></script>
-  <script src="/static/canvas-workspace.js?v=3"></script>
+  <script src="/static/canvas-workspace.js?v=4"></script>
 </body>
 </html>
