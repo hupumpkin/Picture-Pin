@@ -27,3 +27,7 @@ designpeek_dist/screenshots/新添加截图/*
 
 designpeek_dist/data/*
 !designpeek_dist/data/.gitkeep
+
+# 用户上传的字体文件只留在本地
+designpeek_dist/fonts/*
+!designpeek_dist/fonts/.gitkeep

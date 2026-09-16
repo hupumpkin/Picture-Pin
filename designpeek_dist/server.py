@@ -26,6 +26,7 @@ import qrcode
 
 from config import (
     ANALYSIS_FILE,
+    BASE_DIR,
     DATA_DIR,
     HOST,
     INBOX_DIR,
@@ -161,6 +162,11 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif")
 CONVERSATIONS_FILE = os.path.join(DATA_DIR, "conversations.json")
 OBSERVATIONS_FILE = os.path.join(DATA_DIR, "screenshot_observations.json")
 CANVASES_FILE = os.path.join(DATA_DIR, "canvases.json")
+# 用户上传的字体文件独立存放，不与 screenshots 素材目录混在一起
+FONTS_DIR = os.path.join(BASE_DIR, "fonts")
+FONTS_INDEX_FILE = os.path.join(DATA_DIR, "fonts.json")
+FONT_EXTENSIONS = (".ttf", ".otf", ".woff", ".woff2")
+FONT_MAX_BYTES = 20 * 1024 * 1024
 
 
 # ── ensure directories ──────────────────────────────────────────────
@@ -230,6 +236,64 @@ def save_canvas_document(data):
     os.replace(temp_path, CANVASES_FILE)
 
 
+# ── 字体素材 ─────────────────────────────────────────────────────────
+# 字体文件存在 fonts/，索引存在 data/fonts.json；两者都与 screenshots 素材目录分开。
+
+_FONTS_WRITE_LOCK = threading.Lock()
+
+
+def ensure_fonts_dir():
+    os.makedirs(FONTS_DIR, exist_ok=True)
+
+
+def load_fonts():
+    ensure_fonts_dir()
+    if not os.path.exists(FONTS_INDEX_FILE):
+        return []
+    try:
+        with open(FONTS_INDEX_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            raise ValueError("字体索引结构无效")
+        return [item for item in data if isinstance(item, dict) and item.get("id")]
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"  ⚠ 字体索引读取失败，按空列表处理: {exc}")
+        return []
+
+
+def save_fonts(fonts):
+    ensure_fonts_dir()
+    temp_path = f"{FONTS_INDEX_FILE}.tmp"
+    with open(temp_path, "w") as f:
+        json.dump(fonts, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp_path, FONTS_INDEX_FILE)
+
+
+def _public_font(record):
+    filename = str(record.get("filename") or "")
+    return {
+        "id": record.get("id"),
+        "family": record.get("family") or "",
+        "original_name": record.get("original_name") or "",
+        "size": record.get("size") or 0,
+        "uploaded_at": record.get("uploaded_at") or "",
+        "url": f"/fonts/{filename}",
+    }
+
+
+def _unique_font_family(desired, fonts):
+    """展示名同时用作 FontFace 注册名，重名会让后加载的字体覆盖前面的，所以要去重。"""
+    taken = {item.get("family") for item in fonts}
+    family = desired
+    suffix = 2
+    while family in taken:
+        family = f"{desired} {suffix}"
+        suffix += 1
+    return family
+
+
 def _finite_number(value, default, minimum, maximum):
     try:
         number = float(value)
@@ -247,24 +311,41 @@ def _sanitize_canvas(canvas_id, payload, existing=None):
     elements = []
     seen_ids = set()
     for raw in raw_elements[:2000]:
-        if not isinstance(raw, dict) or raw.get("type") != "image":
+        if not isinstance(raw, dict):
             continue
         element_id = str(raw.get("id") or "")[:100]
-        screenshot_id = str(raw.get("screenshot_id") or "")[:255]
-        if not element_id or not screenshot_id or element_id in seen_ids:
+        if not element_id or element_id in seen_ids:
             continue
-        seen_ids.add(element_id)
-        elements.append({
+        geometry = {
             "id": element_id,
-            "type": "image",
-            "screenshot_id": screenshot_id,
             "x": _finite_number(raw.get("x"), 0, -10_000_000, 10_000_000),
             "y": _finite_number(raw.get("y"), 0, -10_000_000, 10_000_000),
             "width": _finite_number(raw.get("width"), 240, 40, 20_000),
             "height": _finite_number(raw.get("height"), 320, 40, 20_000),
             "rotation": _finite_number(raw.get("rotation"), 0, -360, 360),
             "z_index": int(_finite_number(raw.get("z_index"), len(elements), 0, 100_000)),
-        })
+        }
+        if raw.get("type") == "image":
+            screenshot_id = str(raw.get("screenshot_id") or "")[:255]
+            if not screenshot_id:
+                continue
+            elements.append({**geometry, "type": "image", "screenshot_id": screenshot_id})
+        elif raw.get("type") == "text":
+            # 字体元素：文字内容 + 渲染字体，样式细节由前端内置预设决定，不在这里校验
+            text = str(raw.get("text") or "")[:200]
+            if not text:
+                continue
+            elements.append({
+                **geometry,
+                "type": "text",
+                "text": text,
+                "font_family": str(raw.get("font_family") or "")[:120],
+                "style_key": str(raw.get("style_key") or "")[:40],
+                "font_id": str(raw.get("font_id") or "")[:100],
+            })
+        else:
+            continue
+        seen_ids.add(element_id)
     now = datetime.now().isoformat()
     return {
         "id": canvas_id,
@@ -595,6 +676,7 @@ def start_ocr_backfill():
 
 @app.on_event("startup")
 async def startup_ocr_index():
+    ensure_fonts_dir()
     migrate_legacy_analysis_projects()
     start_ocr_backfill()
 
@@ -964,6 +1046,87 @@ async def api_save_canvas(canvas_id: str, req: Request):
         document["canvases"][canvas_id] = canvas
         save_canvas_document(document)
     return {"ok": True, "canvas": canvas}
+
+
+# ── API: Fonts ───────────────────────────────────────────────────────
+
+@app.get("/api/fonts")
+async def api_list_fonts():
+    """Return user-uploaded fonts. Built-in sample fonts live in the frontend."""
+    return {"ok": True, "fonts": [_public_font(item) for item in load_fonts()]}
+
+
+@app.post("/api/fonts/upload")
+async def api_upload_font(file: UploadFile = File(...)):
+    """Receive a font file from the local file picker or a drag-and-drop."""
+    original = os.path.basename(file.filename or "font.ttf").strip() or "font.ttf"
+    ext = os.path.splitext(original)[1].lower()
+    if ext not in FONT_EXTENSIONS:
+        return JSONResponse(
+            {"ok": False, "error": f"只支持 {'、'.join(FONT_EXTENSIONS)} 格式的字体文件"},
+            status_code=400,
+        )
+
+    content = await file.read()
+    if not content:
+        return JSONResponse({"ok": False, "error": "字体文件是空的"}, status_code=400)
+    if len(content) > FONT_MAX_BYTES:
+        limit_mb = FONT_MAX_BYTES // (1024 * 1024)
+        return JSONResponse({"ok": False, "error": f"字体文件超过 {limit_mb} MB"}, status_code=400)
+
+    with _FONTS_WRITE_LOCK:
+        ensure_fonts_dir()
+        font_id = f"font_{uuid.uuid4().hex[:10]}"
+        stored_name = f"{font_id}{ext}"
+        try:
+            with open(os.path.join(FONTS_DIR, stored_name), "wb") as f:
+                f.write(content)
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError as exc:
+            return JSONResponse({"ok": False, "error": f"字体保存失败: {exc}"}, status_code=500)
+
+        fonts = load_fonts()
+        display_name = os.path.splitext(original)[0].strip()[:80] or "未命名字体"
+        record = {
+            "id": font_id,
+            "family": _unique_font_family(display_name, fonts),
+            "filename": stored_name,
+            "original_name": original[:120],
+            "size": len(content),
+            "uploaded_at": datetime.now().isoformat(),
+        }
+        fonts.append(record)
+        save_fonts(fonts)
+
+    print(f"  ✓ 收到字体: {record['family']}  ({len(content) / 1024:.0f} KB)")
+    return {"ok": True, "font": _public_font(record)}
+
+
+@app.delete("/api/fonts/{font_id}")
+async def api_delete_font(font_id: str):
+    with _FONTS_WRITE_LOCK:
+        fonts = load_fonts()
+        target = next((item for item in fonts if item.get("id") == font_id), None)
+        if target is None:
+            return JSONResponse({"ok": False, "error": "字体不存在"}, status_code=404)
+        save_fonts([item for item in fonts if item.get("id") != font_id])
+    # 索引已经更新，文件删不掉也不影响使用，只可能是权限问题
+    try:
+        os.remove(os.path.join(FONTS_DIR, str(target.get("filename") or "")))
+    except OSError:
+        pass
+    return {"ok": True}
+
+
+@app.get("/fonts/{path:path}")
+async def serve_font(path: str):
+    """Serve uploaded font files."""
+    root = os.path.realpath(FONTS_DIR)
+    full = os.path.realpath(os.path.join(root, path))
+    if full.startswith(root + os.sep) and os.path.isfile(full):
+        return FileResponse(full)
+    return JSONResponse({"error": "not found"}, status_code=404)
 
 
 # ── API: Classify screenshots ────────────────────────────────────────

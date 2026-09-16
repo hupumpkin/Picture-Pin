@@ -16,7 +16,65 @@
   const PANEL_STORAGE_KEYS = {
     material: 'dp_canvas_material_collapsed',
     huaban: 'dp_canvas_huaban_collapsed',
+    fonts: 'dp_canvas_fonts_collapsed',
     analysis: 'dp_canvas_analysis_collapsed',
+  };
+
+  const FONT_DRAG_TYPE = 'application/x-designpeek-font';
+  const FONT_ACCEPTED_EXTENSIONS = ['.ttf', '.otf', '.woff', '.woff2'];
+
+  // 三个内置“艺术字”示意图。面板预览和画布节点共用同一套参数，
+  // 面板侧转成 CSS，画布侧转成 Konva 配置，改一处两边同步。
+  // 只用了实测确认存在的字体，华文艺术字系列在近几代 macOS 上已改为按需下载。
+  const FONT_STYLES = {
+    song: {
+      key: 'song',
+      label: '宋韵',
+      sample: '山茶',
+      family: 'STSong, Songti SC, serif',
+      fontSize: 56,
+      fontStyle: 'normal',
+      letterSpacing: 8,
+      gradient: ['#c8a15a', '#8a6a2f'],
+      stroke: null,
+      strokeWidth: 0,
+      shadow: null,
+    },
+    hei: {
+      key: 'hei',
+      label: '黑潮',
+      sample: '浪潮',
+      family: 'Heiti SC, PingFang SC, sans-serif',
+      fontSize: 58,
+      fontStyle: 'bold',
+      letterSpacing: 2,
+      fill: '#252623',
+      shadow: { color: '#d9603c', blur: 0, offsetX: 6, offsetY: 6, opacity: 0.9 },
+    },
+    neon: {
+      key: 'neon',
+      label: '霓虹',
+      sample: '回声',
+      family: 'PingFang SC, sans-serif',
+      fontSize: 58,
+      fontStyle: 'bold',
+      letterSpacing: 4,
+      outlineOnly: true,
+      stroke: '#b7f24a',
+      strokeWidth: 2,
+      shadow: { color: '#b7f24a', blur: 16, offsetX: 0, offsetY: 0, opacity: 0.75 },
+    },
+  };
+  const FONT_STYLE_ORDER = ['song', 'hei', 'neon'];
+  // 用户上传的字体用这个中性样式，字体本身才是主角。
+  const UPLOADED_FONT_STYLE = {
+    key: 'uploaded',
+    label: '自定义',
+    sample: '永念',
+    fontSize: 56,
+    fontStyle: 'normal',
+    letterSpacing: 4,
+    fill: '#252623',
   };
 
   const workspaceState = {
@@ -41,6 +99,9 @@
     huabanFrame: null,
     pasting: false,
     leftPanelWidth: null,
+    fonts: [],
+    fontMap: new Map(),
+    loadedFonts: new Set(),
   };
 
   const dom = {};
@@ -55,7 +116,8 @@
     cacheDom();
     bindWorkspaceEvents();
     initStage();
-    await Promise.all([loadMaterials(), loadCanvas()]);
+    // 字体要先注册完再渲染画布，否则文字节点会按兜底字体量错尺寸。
+    await Promise.all([loadMaterials(), loadCanvas(), loadFonts()]);
     renderCanvasElements();
     window.setInterval(refreshMaterialsQuietly, MATERIAL_REFRESH_INTERVAL);
   }
@@ -76,6 +138,10 @@
       'canvasHuabanPanel', 'canvasHuabanStatus', 'canvasHuabanReload',
       'canvasHuabanOpen', 'canvasHuabanToggle', 'canvasHuabanLoading',
       'canvasHuabanFrameWrap', 'canvasMaterialResize', 'canvasHuabanResize',
+      'canvasFontPanel', 'canvasFontStatus', 'canvasFontUpload', 'canvasFontToggle',
+      'canvasFontScroll', 'canvasFontBuiltinList', 'canvasFontUploadedList',
+      'canvasFontUploadedCount', 'canvasFontEmpty', 'canvasFontDropzone',
+      'canvasFontInput', 'canvasFontResize',
     ];
     ids.forEach(id => { dom[id] = document.getElementById(id); });
   }
@@ -110,9 +176,14 @@
     dom.canvasHuabanReload.addEventListener('click', () => loadHuabanFrame(true));
     dom.canvasHuabanOpen.addEventListener('click', () => window.open(HUABAN_URL, '_blank', 'noopener'));
     dom.canvasHuabanToggle.addEventListener('click', () => toggleFloatingPanel('huaban'));
+    dom.canvasFontToggle.addEventListener('click', () => toggleFloatingPanel('fonts'));
+    dom.canvasFontUpload.addEventListener('click', () => dom.canvasFontInput.click());
+    dom.canvasFontInput.addEventListener('change', handleFontUpload);
+    bindFontDropzone();
     document.addEventListener('paste', handleWorkspacePaste);
     bindPanelResize(dom.canvasMaterialResize);
     bindPanelResize(dom.canvasHuabanResize);
+    bindPanelResize(dom.canvasFontResize);
     // 用 ResizeObserver 而不是 window.resize：前者在布局完成后再回调，
     // 拿到的面板位置才是新断点下的值。
     const widthObserver = new ResizeObserver(renderLeftPanelWidth);
@@ -125,7 +196,7 @@
     setupAnalysisBridge();
 
     dom.canvasStageShell.addEventListener('dragover', event => {
-      if (!hasScreenshotDrag(event)) return;
+      if (!hasCanvasDrag(event)) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = 'copy';
       dom.canvasStageShell.classList.add('drag-over');
@@ -135,7 +206,7 @@
         dom.canvasStageShell.classList.remove('drag-over');
       }
     });
-    dom.canvasStageShell.addEventListener('drop', dropMaterialOnCanvas);
+    dom.canvasStageShell.addEventListener('drop', dropOnCanvas);
 
     window.addEventListener('keydown', event => {
       const target = event.target;
@@ -152,10 +223,7 @@
   }
 
   function selectWorkspaceSource(source) {
-    if (source !== 'screenshots' && source !== 'huaban') {
-      workspaceToast('站酷素材源将在后续版本接入');
-      return;
-    }
+    if (!['screenshots', 'huaban', 'fonts'].includes(source)) return;
     workspaceState.source = source;
     document.querySelectorAll('.source-item').forEach(button => {
       const active = button.dataset.source === source;
@@ -163,17 +231,19 @@
       button.setAttribute('aria-pressed', String(active));
     });
     const materialPanel = document.querySelector('.material-panel');
-    if (materialPanel) materialPanel.hidden = source === 'huaban';
+    if (materialPanel) materialPanel.hidden = source !== 'screenshots';
     dom.canvasHuabanPanel.hidden = source !== 'huaban';
+    dom.canvasFontPanel.hidden = source !== 'fonts';
     try { localStorage.setItem(SOURCE_STORAGE_KEY, source); } catch (_) {}
     if (source === 'huaban') ensureHuabanFrame();
+    if (source === 'fonts') renderFonts();
     renderLeftPanelWidth();
   }
 
   function restoreWorkspaceSource() {
     let stored = null;
     try { stored = localStorage.getItem(SOURCE_STORAGE_KEY); } catch (_) {}
-    selectWorkspaceSource(stored === 'huaban' ? 'huaban' : 'screenshots');
+    selectWorkspaceSource(['huaban', 'fonts'].includes(stored) ? stored : 'screenshots');
   }
 
   // 花瓣只在用户第一次点开时才加载，避免每次打开 Pin 都请求外部站点。
@@ -200,9 +270,9 @@
   }
 
   function activeLeftPanel() {
-    return workspaceState.source === 'huaban'
-      ? dom.canvasHuabanPanel
-      : document.querySelector('.material-panel');
+    if (workspaceState.source === 'huaban') return dom.canvasHuabanPanel;
+    if (workspaceState.source === 'fonts') return dom.canvasFontPanel;
+    return document.querySelector('.material-panel');
   }
 
   // 最宽不能压到右侧分析面板，留出 LEFT_PANEL_GAP 的间距。
@@ -249,7 +319,7 @@
 
   function bindPanelResize(handle) {
     if (!handle) return;
-    const panel = handle.closest('.material-panel, .huaban-panel');
+    const panel = handle.closest('.material-panel, .huaban-panel, .font-panel');
     if (!panel) return;
 
     handle.addEventListener('pointerdown', event => {
@@ -567,6 +637,338 @@
       || null;
   }
 
+  // ── 字体素材 ───────────────────────────────────────────────────────
+
+  async function loadFonts() {
+    try {
+      const response = await fetch('/api/fonts');
+      if (!response.ok) throw new Error('字体读取失败');
+      const result = await response.json();
+      workspaceState.fonts = Array.isArray(result.fonts) ? result.fonts : [];
+    } catch (_) {
+      workspaceState.fonts = [];
+    }
+    workspaceState.fontMap = new Map(workspaceState.fonts.map(item => [item.id, item]));
+    // 浏览器不跨刷新保留 FontFace，每次进页面都要按索引重新注册一遍。
+    await Promise.all(workspaceState.fonts.map(font => ensureFontFace(font)));
+    renderFonts();
+  }
+
+  async function ensureFontFace(font) {
+    if (!font || !font.family || !font.url) return false;
+    if (workspaceState.loadedFonts.has(font.family)) return true;
+    if (typeof FontFace !== 'function') return false;
+    try {
+      const face = new FontFace(font.family, `url("${font.url}")`);
+      await face.load();
+      document.fonts.add(face);
+      workspaceState.loadedFonts.add(font.family);
+      return true;
+    } catch (_) {
+      workspaceToast(`字体「${font.family}」加载失败，画布上会显示为默认字体`);
+      return false;
+    }
+  }
+
+  // 元素只记 style_key，样式参数始终从预设取，避免旧数据里存着过时的颜色。
+  function fontStyleOf(element) {
+    if (element.font_id || element.style_key === UPLOADED_FONT_STYLE.key) return UPLOADED_FONT_STYLE;
+    return FONT_STYLES[element.style_key] || FONT_STYLES.song;
+  }
+
+  // 面板预览用 CSS 还原预设，和画布侧的 Konva 配置出自同一份参数。
+  function fontPreviewStyle(style, family) {
+    const css = {
+      fontFamily: family || style.family,
+      fontSize: `${Math.round(style.fontSize * 0.6)}px`,
+      letterSpacing: `${Math.round((style.letterSpacing || 0) * 0.6)}px`,
+    };
+    if (style.fontStyle === 'bold') css.fontWeight = '700';
+    if (style.shadow) {
+      const { offsetX = 0, offsetY = 0, blur = 0, color } = style.shadow;
+      css.textShadow = `${offsetX}px ${offsetY}px ${blur}px ${color}`;
+    }
+    if (style.outlineOnly) {
+      css.color = 'transparent';
+      css.webkitTextStroke = `${style.strokeWidth || 1}px ${style.stroke}`;
+    } else if (style.gradient) {
+      css.backgroundImage = `linear-gradient(135deg, ${style.gradient[0]}, ${style.gradient[1]})`;
+      css.webkitBackgroundClip = 'text';
+      css.backgroundClip = 'text';
+      css.color = 'transparent';
+    } else {
+      css.color = style.fill || '#252623';
+    }
+    return css;
+  }
+
+  function renderFonts() {
+    if (!dom.canvasFontBuiltinList) return;
+
+    dom.canvasFontBuiltinList.replaceChildren();
+    FONT_STYLE_ORDER.forEach(key => {
+      const style = FONT_STYLES[key];
+      dom.canvasFontBuiltinList.append(buildFontCard({
+        dragKey: `builtin:${key}`,
+        label: style.label,
+        hint: '内置示意',
+        sample: style.sample,
+        style,
+        family: style.family,
+      }));
+    });
+
+    dom.canvasFontUploadedList.replaceChildren();
+    workspaceState.fonts.forEach(font => {
+      dom.canvasFontUploadedList.append(buildFontCard({
+        dragKey: `font:${font.id}`,
+        label: font.family,
+        hint: formatFontSize(font.size),
+        sample: UPLOADED_FONT_STYLE.sample,
+        style: UPLOADED_FONT_STYLE,
+        family: `"${font.family}"`,
+        font,
+      }));
+    });
+
+    dom.canvasFontUploadedCount.textContent = `${workspaceState.fonts.length} 个`;
+    dom.canvasFontEmpty.hidden = workspaceState.fonts.length > 0;
+  }
+
+  function buildFontCard({ dragKey, label, hint, sample, style, family, font = null }) {
+    const card = document.createElement('div');
+    card.className = 'font-card';
+    card.draggable = true;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
+    card.title = `拖动「${label}」到画布`;
+    card.setAttribute('aria-label', `拖动字体 ${label} 到画布`);
+
+    const sampleEl = document.createElement('span');
+    sampleEl.className = 'font-card-sample';
+    sampleEl.textContent = sample;
+    Object.assign(sampleEl.style, fontPreviewStyle(style, family));
+
+    const meta = document.createElement('span');
+    meta.className = 'font-card-meta';
+    const name = document.createElement('b');
+    name.textContent = label;
+    const tail = document.createElement('span');
+    tail.textContent = hint;
+    meta.append(name, tail);
+
+    card.append(sampleEl, meta);
+
+    if (font) {
+      const remove = document.createElement('button');
+      remove.className = 'font-card-delete';
+      remove.type = 'button';
+      remove.title = `删除字体 ${label}`;
+      remove.setAttribute('aria-label', `删除字体 ${label}`);
+      remove.innerHTML = '<i class="ri-delete-bin-line"></i>';
+      remove.addEventListener('click', event => {
+        event.stopPropagation();
+        deleteFont(font);
+      });
+      card.append(remove);
+    }
+
+    card.addEventListener('dragstart', event => {
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(FONT_DRAG_TYPE, dragKey);
+      event.dataTransfer.setData('text/plain', label);
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => card.classList.remove('dragging'));
+    // 双击直接落到视口中央，省一次拖拽
+    card.addEventListener('dblclick', () => addCanvasFont(dragKey, canvasViewportCenter()));
+
+    return card;
+  }
+
+  function formatFontSize(bytes) {
+    const size = Number(bytes) || 0;
+    if (size <= 0) return '字体文件';
+    return size >= 1024 * 1024
+      ? `${(size / 1024 / 1024).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(size / 1024))} KB`;
+  }
+
+  function isFontFile(file) {
+    const name = String(file?.name || '').toLowerCase();
+    return FONT_ACCEPTED_EXTENSIONS.some(ext => name.endsWith(ext));
+  }
+
+  function fontFilesFrom(event) {
+    const items = Array.from(event.dataTransfer?.items || []);
+    const files = items.length
+      ? items.filter(item => item.kind === 'file').map(item => item.getAsFile())
+      : Array.from(event.dataTransfer?.files || []);
+    return files.filter(file => file && isFontFile(file));
+  }
+
+  function bindFontDropzone() {
+    const zone = dom.canvasFontDropzone;
+    if (!zone) return;
+    ['dragenter', 'dragover'].forEach(type => {
+      zone.addEventListener(type, event => {
+        if (!fontFilesFrom(event).length) return;
+        event.preventDefault();
+        event.stopPropagation();
+        zone.classList.add('drag-over');
+      });
+    });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+    zone.addEventListener('drop', async event => {
+      const files = fontFilesFrom(event);
+      if (!files.length) return;
+      event.preventDefault();
+      event.stopPropagation();
+      zone.classList.remove('drag-over');
+      await uploadFontFiles(files);
+    });
+    zone.addEventListener('click', () => dom.canvasFontInput.click());
+  }
+
+  async function handleFontUpload(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    await uploadFontFiles(files);
+  }
+
+  async function uploadFontFiles(files) {
+    const accepted = files.filter(isFontFile);
+    if (!accepted.length) {
+      workspaceToast(`请选择 ${FONT_ACCEPTED_EXTENSIONS.join(' / ')} 格式的字体文件`);
+      return;
+    }
+    let uploaded = 0;
+    for (const file of accepted) {
+      const form = new FormData();
+      form.append('file', file, file.name);
+      try {
+        const response = await fetch('/api/fonts/upload', { method: 'POST', body: form });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result.ok) throw new Error(result.error || '上传失败');
+        uploaded += 1;
+      } catch (error) {
+        workspaceToast(`${file.name}：${error.message || '上传失败'}`);
+      }
+    }
+    if (!uploaded) return;
+    await loadFonts();
+    selectWorkspaceSource('fonts');
+    workspaceToast(uploaded === 1 ? '字体已上传，拖到画布就能用' : `已上传 ${uploaded} 个字体`);
+  }
+
+  async function deleteFont(font) {
+    if (!confirm(`确定删除字体「${font.family}」？\n画布上用到它的文字会退回默认字体。`)) return;
+    try {
+      const response = await fetch(`/api/fonts/${encodeURIComponent(font.id)}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error('删除失败');
+    } catch (error) {
+      workspaceToast(error.message || '删除失败');
+      return;
+    }
+    workspaceState.loadedFonts.delete(font.family);
+    await loadFonts();
+    workspaceToast('字体已删除');
+  }
+
+  async function addCanvasFont(dragKey, point) {
+    const isBuiltin = dragKey.startsWith('builtin:');
+    const styleKey = isBuiltin ? dragKey.slice('builtin:'.length) : UPLOADED_FONT_STYLE.key;
+    const font = isBuiltin ? null : workspaceState.fontMap.get(dragKey.slice('font:'.length));
+    const style = isBuiltin ? FONT_STYLES[styleKey] : UPLOADED_FONT_STYLE;
+    if (!style) return;
+    if (!isBuiltin && !font) {
+      workspaceToast('这个字体已经不在了，请重新上传');
+      await loadFonts();
+      return;
+    }
+    if (font) await ensureFontFace(font);
+
+    const element = {
+      id: createElementId(),
+      type: 'text',
+      text: style.sample,
+      font_family: font ? `"${font.family}"` : style.family,
+      style_key: styleKey,
+      font_id: font ? font.id : '',
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      rotation: 0,
+      z_index: getCanvasNodes().length,
+    };
+    const node = createCanvasTextNode(element);
+    element.width = node.width();
+    element.height = node.height();
+    node.position({ x: point.x - element.width / 2, y: point.y - element.height / 2 });
+    workspaceState.layer.add(node);
+    workspaceState.transformer.moveToTop();
+    selectCanvasNode(node);
+    workspaceState.layer.batchDraw();
+    updateCanvasEmptyState();
+    scheduleCanvasSave();
+  }
+
+  // 把样式预设翻译成 Konva 配置；渐变依赖节点尺寸，所以要等 Konva 量完文字再设。
+  function createCanvasTextNode(element) {
+    const style = fontStyleOf(element);
+    const family = element.font_family || style.family;
+    const config = {
+      id: element.id,
+      name: 'canvas-text',
+      x: element.x || 0,
+      y: element.y || 0,
+      text: element.text,
+      fontFamily: family,
+      fontSize: style.fontSize,
+      fontStyle: style.fontStyle === 'bold' ? 'bold' : 'normal',
+      letterSpacing: style.letterSpacing || 0,
+      rotation: element.rotation || 0,
+      draggable: true,
+      // 自定义属性统一加 dp 前缀，避开 Konva 自己的 fontFamily / text 等字段
+      dpText: element.text,
+      dpFamily: family,
+      dpStyleKey: style.key,
+      dpFontId: element.font_id || '',
+    };
+
+    if (style.outlineOnly) {
+      config.fillEnabled = false;
+      config.stroke = style.stroke;
+      config.strokeWidth = style.strokeWidth || 1;
+    } else {
+      config.fill = style.fill || '#252623';
+    }
+    if (style.shadow) {
+      config.shadowColor = style.shadow.color;
+      config.shadowBlur = style.shadow.blur || 0;
+      config.shadowOffsetX = style.shadow.offsetX || 0;
+      config.shadowOffsetY = style.shadow.offsetY || 0;
+      config.shadowOpacity = style.shadow.opacity ?? 1;
+      config.shadowForStrokeEnabled = true;
+    }
+
+    const node = new Konva.Text(config);
+    applyTextGradient(node);
+    bindCanvasNodeEvents(node);
+    return node;
+  }
+
+  // 尺寸变了要重算渐变端点，否则渐变会停在创建时的长度上。
+  function applyTextGradient(node) {
+    const style = fontStyleOf({ style_key: node.getAttr('dpStyleKey'), font_id: node.getAttr('dpFontId') });
+    if (!style.gradient || style.outlineOnly) return;
+    node.fillPriority('linear-gradient');
+    node.fillLinearGradientStartPoint({ x: 0, y: 0 });
+    node.fillLinearGradientEndPoint({ x: node.width(), y: node.height() });
+    node.fillLinearGradientColorStops([0, style.gradient[0], 1, style.gradient[1]]);
+  }
+
   function canvasViewportCenter() {
     const stage = workspaceState.stage;
     return {
@@ -686,23 +1088,33 @@
     dom.canvasZoomValue.textContent = `${Math.round(workspaceState.stage.scaleX() * 100)}%`;
   }
 
-  function hasScreenshotDrag(event) {
-    return Array.from(event.dataTransfer?.types || []).includes('application/x-designpeek-screenshot');
+  function hasCanvasDrag(event) {
+    const types = Array.from(event.dataTransfer?.types || []);
+    return types.includes('application/x-designpeek-screenshot') || types.includes(FONT_DRAG_TYPE);
   }
 
-  async function dropMaterialOnCanvas(event) {
+  async function dropOnCanvas(event) {
     dom.canvasStageShell.classList.remove('drag-over');
-    const screenshotId = event.dataTransfer.getData('application/x-designpeek-screenshot');
-    if (!screenshotId) return;
+    const types = Array.from(event.dataTransfer?.types || []);
+    const isScreenshot = types.includes('application/x-designpeek-screenshot');
+    const isFont = types.includes(FONT_DRAG_TYPE);
+    if (!isScreenshot && !isFont) return;
     event.preventDefault();
-    const screenshot = workspaceState.screenshotMap.get(screenshotId);
+
+    const rect = dom.canvasStageShell.getBoundingClientRect();
+    const worldPoint = screenToWorld({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+
+    if (isFont) {
+      const key = event.dataTransfer.getData(FONT_DRAG_TYPE);
+      if (key) await addCanvasFont(key, worldPoint);
+      return;
+    }
+
+    const screenshot = workspaceState.screenshotMap.get(event.dataTransfer.getData('application/x-designpeek-screenshot'));
     if (!screenshot) {
       workspaceToast('这张素材暂时无法读取');
       return;
     }
-    const rect = dom.canvasStageShell.getBoundingClientRect();
-    const screenPoint = { x: event.clientX - rect.left, y: event.clientY - rect.top };
-    const worldPoint = screenToWorld(screenPoint);
     await addCanvasImage(screenshot, worldPoint);
   }
 
@@ -727,7 +1139,7 @@
         width: size.width,
         height: size.height,
         rotation: 0,
-        z_index: getCanvasImageNodes().length,
+        z_index: getCanvasNodes().length,
       };
       const node = createCanvasImageNode(image, element);
       workspaceState.layer.add(node);
@@ -759,6 +1171,11 @@
       shadowOffsetY: 2,
       screenshotId: element.screenshot_id,
     });
+    bindCanvasNodeEvents(node);
+    return node;
+  }
+
+  function bindCanvasNodeEvents(node) {
     node.on('mousedown touchstart', event => {
       event.cancelBubble = true;
       selectCanvasNode(node);
@@ -774,14 +1191,19 @@
     node.on('transformend', () => {
       const scaleX = Math.abs(node.scaleX());
       const scaleY = Math.abs(node.scaleY());
-      node.width(Math.max(40, node.width() * scaleX));
-      node.height(Math.max(40, node.height() * scaleY));
       node.scale({ x: 1, y: 1 });
+      if (node.name() === 'canvas-text') {
+        // 文字按字号缩放；直接改 width/height 会触发换行，字形就变了
+        node.fontSize(Math.max(10, Math.round(node.fontSize() * Math.max(scaleX, scaleY))));
+        applyTextGradient(node);
+      } else {
+        node.width(Math.max(40, node.width() * scaleX));
+        node.height(Math.max(40, node.height() * scaleY));
+      }
       workspaceState.transformer.forceUpdate();
       workspaceState.layer.batchDraw();
       scheduleCanvasSave();
     });
-    return node;
   }
 
   function selectCanvasNode(node) {
@@ -803,6 +1225,7 @@
   const PANEL_CONFIG = {
     material: { label: '截图素材', onLeft: true, panel: () => document.querySelector('.material-panel'), button: () => dom.canvasMaterialToggle },
     huaban: { label: '花瓣', onLeft: true, panel: () => dom.canvasHuabanPanel, button: () => dom.canvasHuabanToggle },
+    fonts: { label: '字体', onLeft: true, panel: () => dom.canvasFontPanel, button: () => dom.canvasFontToggle },
     analysis: { label: '分析', onLeft: false, panel: () => dom.canvasAnalysisPanel, button: () => dom.canvasAnalysisToggle },
   };
 
@@ -834,6 +1257,7 @@
     };
     toggleFloatingPanel('material', stored('material'));
     toggleFloatingPanel('huaban', stored('huaban'));
+    toggleFloatingPanel('fonts', stored('fonts'));
     toggleFloatingPanel('analysis', stored('analysis'));
   }
 
@@ -891,26 +1315,37 @@
   function updateAnalyzeSelectionButton() {
     if (!dom.canvasAnalyzeSelection) return;
     const node = workspaceState.selectedNode;
+    // 分析只吃截图素材，字体元素没有对应的截图可引用，直接置灰。
+    const screenshotId = node && node.name() !== 'canvas-text' ? node.getAttr('screenshotId') : null;
     const label = dom.canvasAnalyzeSelection.querySelector('small');
-    dom.canvasAnalyzeSelection.disabled = !node;
+    dom.canvasAnalyzeSelection.disabled = !screenshotId;
     if (!label) return;
     if (!node) {
       label.textContent = '请先在画布中选择一张图片';
       return;
     }
-    const screenshot = workspaceState.screenshotMap.get(node.getAttr('screenshotId'));
+    if (!screenshotId) {
+      label.textContent = '字体元素不支持分析';
+      return;
+    }
+    const screenshot = workspaceState.screenshotMap.get(screenshotId);
     label.textContent = screenshot?.app || materialFolderName(screenshot || {}) || '已选择 1 张素材';
   }
 
   async function createAnalysisFromCanvasSelection() {
     const node = workspaceState.selectedNode;
     if (!node) return;
+    const screenshotId = node.name() !== 'canvas-text' ? node.getAttr('screenshotId') : null;
+    if (!screenshotId) {
+      workspaceToast('字体元素不支持分析，请选择截图素材');
+      return;
+    }
     dom.canvasAnalyzeSelection.disabled = true;
     try {
       const response = await fetch('/api/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ screenshot_ids: [node.getAttr('screenshotId')] }),
+        body: JSON.stringify({ screenshot_ids: [screenshotId] }),
       });
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error(result.error || '无法创建分析');
@@ -930,12 +1365,13 @@
   function removeSelectedCanvasImage() {
     const node = workspaceState.selectedNode;
     if (!node) return;
+    const isText = node.name() === 'canvas-text';
     clearCanvasSelection();
     node.destroy();
     workspaceState.layer.batchDraw();
     updateCanvasEmptyState();
     scheduleCanvasSave();
-    workspaceToast('已从画布移除，原素材仍然保留');
+    workspaceToast(isText ? '已从画布移除' : '已从画布移除，原素材仍然保留');
   }
 
   async function loadCanvas() {
@@ -962,6 +1398,7 @@
   async function renderCanvasElements() {
     const elements = [...(workspaceState.canvas?.elements || [])].sort((a, b) => a.z_index - b.z_index);
     const loaded = await Promise.all(elements.map(async element => {
+      if (element.type === 'text') return createCanvasTextNode(element);
       const screenshot = workspaceState.screenshotMap.get(element.screenshot_id);
       if (!screenshot) return null;
       try {
@@ -978,11 +1415,11 @@
   }
 
   function updateCanvasEmptyState() {
-    dom.canvasEmptyState.hidden = getCanvasImageNodes().length > 0;
+    dom.canvasEmptyState.hidden = getCanvasNodes().length > 0;
   }
 
   function fitCanvasContent() {
-    const nodes = getCanvasImageNodes();
+    const nodes = getCanvasNodes();
     if (!nodes.length) {
       workspaceState.stage.position({ x: 0, y: 0 });
       workspaceState.stage.scale({ x: 1, y: 1 });
@@ -1059,17 +1496,28 @@
         y: workspaceState.stage.y(),
         scale: workspaceState.stage.scaleX(),
       },
-      elements: getCanvasImageNodes().map((node, index) => ({
-        id: node.id(),
-        type: 'image',
-        screenshot_id: node.getAttr('screenshotId'),
-        x: node.x(),
-        y: node.y(),
-        width: node.width(),
-        height: node.height(),
-        rotation: node.rotation(),
-        z_index: index,
-      })),
+      elements: getCanvasNodes().map((node, index) => {
+        const geometry = {
+          id: node.id(),
+          x: node.x(),
+          y: node.y(),
+          width: node.width(),
+          height: node.height(),
+          rotation: node.rotation(),
+          z_index: index,
+        };
+        if (node.name() === 'canvas-text') {
+          return {
+            ...geometry,
+            type: 'text',
+            text: node.getAttr('dpText'),
+            font_family: node.getAttr('dpFamily'),
+            style_key: node.getAttr('dpStyleKey'),
+            font_id: node.getAttr('dpFontId') || '',
+          };
+        }
+        return { ...geometry, type: 'image', screenshot_id: node.getAttr('screenshotId') };
+      }),
     };
   }
 
@@ -1082,8 +1530,8 @@
     if (label) label.textContent = text;
   }
 
-  function getCanvasImageNodes() {
-    return workspaceState.layer ? workspaceState.layer.find('.canvas-image') : [];
+  function getCanvasNodes() {
+    return workspaceState.layer ? workspaceState.layer.find('.canvas-image, .canvas-text') : [];
   }
 
   function screenshotUrl(path) {

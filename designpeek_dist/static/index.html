@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>DesignPeek / 设计透视</title>
   <link rel="stylesheet" href="/static/vendor/remixicon/remixicon.css">
-  <link rel="stylesheet" href="/static/style.css?v=107">
+  <link rel="stylesheet" href="/static/style.css?v=108">
 </head>
 <body>
 <div class="canvas-workspace" id="canvasWorkspace">
@@ -20,8 +20,8 @@
       <button class="source-item" data-source="huaban" aria-pressed="false" title="花瓣浏览">
         <i class="ri-palette-line"></i><span>花瓣</span>
       </button>
-      <button class="source-item source-placeholder" data-source="zcool" aria-pressed="false" title="站酷（即将支持）">
-        <i class="ri-shape-2-line"></i><span>站酷</span><small>即将支持</small>
+      <button class="source-item" data-source="fonts" aria-pressed="false" title="字体素材">
+        <i class="ri-font-size-2"></i><span>字体</span>
       </button>
     </div>
     <div class="source-rail-actions">
@@ -86,6 +86,41 @@
     </div>
     <div class="panel-resize-handle" id="canvasHuabanResize" role="separator" aria-orientation="vertical" aria-label="拖动调整花瓣区宽度，双击恢复默认" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
     <div class="floating-panel-collapsed-label"><i class="ri-palette-line"></i><span>花瓣</span></div>
+  </aside>
+
+  <aside class="font-panel" id="canvasFontPanel" aria-label="字体素材" hidden>
+    <header class="material-panel-header">
+      <div><h1>字体</h1><span id="canvasFontStatus">拖到右侧画布即可使用</span></div>
+      <div class="floating-panel-actions">
+        <button class="material-icon-button" id="canvasFontUpload" title="上传字体" aria-label="上传字体"><i class="ri-upload-2-line"></i></button>
+        <button class="material-icon-button floating-panel-toggle" id="canvasFontToggle" title="收起字体" aria-label="收起字体" aria-expanded="true"><i class="ri-arrow-left-s-line"></i></button>
+      </div>
+    </header>
+    <div class="font-hint">
+      <i class="ri-drag-move-2-line"></i>
+      <span>把字体卡片拖到画布上；也可以上传自己的 <code>.ttf</code> / <code>.otf</code></span>
+    </div>
+    <div class="font-panel-scroll" id="canvasFontScroll">
+      <section class="font-section">
+        <div class="material-section-title"><span>内置样式</span><small>示意图</small></div>
+        <div class="font-list" id="canvasFontBuiltinList"></div>
+      </section>
+      <section class="font-section">
+        <div class="material-section-title"><span>我上传的字体</span><small id="canvasFontUploadedCount">0 个</small></div>
+        <div class="font-list" id="canvasFontUploadedList"></div>
+      </section>
+      <div class="font-empty" id="canvasFontEmpty" hidden>
+        <i class="ri-font-size-2"></i>
+        <strong>还没有上传字体</strong>
+        <span>支持 .ttf / .otf / .woff / .woff2</span>
+      </div>
+    </div>
+    <div class="font-dropzone" id="canvasFontDropzone">
+      <i class="ri-upload-cloud-2-line"></i><span>把字体文件拖到这里上传</span>
+    </div>
+    <input type="file" id="canvasFontInput" accept=".ttf,.otf,.woff,.woff2,font/*" hidden>
+    <div class="panel-resize-handle" id="canvasFontResize" role="separator" aria-orientation="vertical" aria-label="拖动调整字体区宽度，双击恢复默认" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
+    <div class="floating-panel-collapsed-label"><i class="ri-font-size-2"></i><span>字体</span></div>
   </aside>
 
   <main class="canvas-main">
@@ -470,6 +505,6 @@
 
   <script src="/static/app.js?v=152"></script>
   <script src="/static/vendor/konva/konva.min.js?v=10.5.0"></script>
-  <script src="/static/canvas-workspace.js?v=4"></script>
+  <script src="/static/canvas-workspace.js?v=5"></script>
 </body>
 </html>

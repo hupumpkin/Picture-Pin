@@ -36,6 +36,7 @@ body {
   --rail-width: 76px;
   --library-width: 316px;
   --huaban-width: 560px;
+  --font-width: 620px;
   --analysis-width: 400px;
   position: relative;
   display: grid;
@@ -422,7 +423,7 @@ body {
 @keyframes canvas-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1050px) {
-  .canvas-workspace { --rail-width: 68px; --library-width: 280px; --huaban-width: 420px; --analysis-width: 350px; }
+  .canvas-workspace { --rail-width: 68px; --library-width: 280px; --huaban-width: 420px; --font-width: 460px; --analysis-width: 350px; }
   .source-rail { padding-inline: 6px; }
   .source-item.active::before { left: -6px; }
   .material-grid { gap: 10px 8px; }
@@ -493,7 +494,8 @@ body {
 body.resizing-left-panel .panel-resize-handle::after { background: #b4b5b0; }
 .panel-resize-handle:focus-visible { outline: none; }
 .material-panel.collapsed .panel-resize-handle,
-.huaban-panel.collapsed .panel-resize-handle { display: none; }
+.huaban-panel.collapsed .panel-resize-handle,
+.font-panel.collapsed .panel-resize-handle { display: none; }
 
 /* 拖动时锁住光标、关掉宽度过渡，并让 iframe 不再抢走指针事件。 */
 body.resizing-left-panel { cursor: col-resize; user-select: none; }
@@ -525,6 +527,7 @@ body.resizing-left-panel .huaban-panel { transition: none; }
 /* 这几个元素用 display:flex 布局，需要显式让 [hidden] 生效。 */
 .material-panel[hidden],
 .huaban-panel[hidden],
+.font-panel[hidden],
 .huaban-frame-status[hidden] { display: none; }
 
 .huaban-panel.collapsed { width: 48px; box-shadow: 0 4px 14px rgba(37,38,35,0.08); }
@@ -587,6 +590,164 @@ body.resizing-left-panel .huaban-panel { transition: none; }
   font-size: 11px;
 }
 .huaban-frame-status i { font-size: 18px; animation: canvas-spin 0.8s linear infinite; }
+
+/* ── 字体面板 ─────────────────────────────────────────────────────── */
+
+.font-panel {
+  position: absolute;
+  top: 66px;
+  bottom: 14px;
+  left: calc(var(--rail-width) + 14px);
+  z-index: 3;
+  display: flex;
+  width: var(--left-panel-width, var(--font-width));
+  max-width: calc(100vw - var(--rail-width) - 28px);
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: #fbfbfa;
+  border: 1px solid #d2d2cf;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(37,38,35,0.1);
+  transition: width 0.22s ease, box-shadow 0.22s ease;
+}
+
+.font-panel.collapsed { width: 48px; box-shadow: 0 4px 14px rgba(37,38,35,0.08); }
+.font-panel.collapsed .font-hint,
+.font-panel.collapsed .font-panel-scroll,
+.font-panel.collapsed .font-dropzone { display: none; }
+.font-panel.collapsed .material-panel-header { min-height: 44px; justify-content: center; padding: 6px; }
+.font-panel.collapsed .material-panel-header > div:first-child,
+.font-panel.collapsed .floating-panel-actions > :not(.floating-panel-toggle) { display: none; }
+.font-panel.collapsed .floating-panel-actions { display: block; }
+.font-panel.collapsed .floating-panel-collapsed-label {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding-top: 13px;
+  color: #777873;
+  font-size: 10px;
+  writing-mode: vertical-rl;
+}
+
+.font-hint {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 14px 10px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: #f1f1ef;
+  color: #6b6c67;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.font-hint i { flex-shrink: 0; color: #858681; font-size: 14px; }
+.font-hint code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #fff;
+  border: 1px solid #e0e0dc;
+  color: #4a4b47;
+  font-size: 9px;
+}
+
+.font-panel-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 14px 6px; }
+.font-section { margin-bottom: 16px; }
+.font-list { display: flex; flex-direction: column; gap: 8px; }
+
+/* 卡片整体可拖动；样式示意由 JS 按预设写到内联样式上，面板和画布共用一套参数。 */
+.font-card {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 14px 14px 10px;
+  border: 1px solid #e0e0dc;
+  border-radius: 8px;
+  background: #fff;
+  cursor: grab;
+  text-align: left;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.font-card:hover { border-color: #c3c3be; box-shadow: 0 4px 12px rgba(37,38,35,0.09); }
+.font-card:focus-visible { outline: 2px solid #8a8b85; outline-offset: 1px; }
+.font-card:active { cursor: grabbing; }
+.font-card.dragging { opacity: 0.45; }
+
+.font-card-sample {
+  display: block;
+  min-height: 40px;
+  margin-bottom: 8px;
+  font-size: 34px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #252623;
+}
+
+.font-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9a9b96;
+  font-size: 10px;
+}
+.font-card-meta b { overflow: hidden; font-weight: 600; color: #6b6c67; text-overflow: ellipsis; white-space: nowrap; }
+.font-card-meta span { flex-shrink: 0; }
+
+.font-card-delete {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #b4b5b0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.font-card:hover .font-card-delete { opacity: 1; }
+.font-card-delete:hover { background: #f3eeec; color: #c0553a; }
+
+.font-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 20px 12px 26px;
+  color: #9a9b96;
+  font-size: 11px;
+  text-align: center;
+}
+.font-empty[hidden] { display: none; }
+.font-empty i { font-size: 20px; }
+.font-empty strong { color: #6b6c67; font-size: 12px; font-weight: 600; }
+
+.font-dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 0 14px 12px;
+  padding: 11px;
+  border: 1px dashed #d2d2cf;
+  border-radius: 7px;
+  background: #f6f6f4;
+  color: #858681;
+  font-size: 11px;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+.font-dropzone.drag-over { border-color: #8a8b85; background: #eeeeeb; color: #4a4b47; }
+.font-dropzone i { font-size: 15px; }
 
 .floating-analysis-panel {
   position: absolute;
@@ -716,7 +877,7 @@ body.resizing-left-panel .huaban-panel { transition: none; }
 .floating-analysis-panel .evidence-thumbs { gap: 5px; }
 
 @media (max-width: 820px) {
-  .canvas-workspace { --library-width: 260px; --huaban-width: 360px; --analysis-width: 320px; }
+  .canvas-workspace { --library-width: 260px; --huaban-width: 360px; --font-width: 380px; --analysis-width: 320px; }
   .material-panel,
   .huaban-panel,
   .floating-analysis-panel { top: 60px; bottom: 10px; }
