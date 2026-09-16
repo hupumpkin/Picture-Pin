@@ -13,7 +13,7 @@
 | `designpeek` | 原 DesignPeek 网页版 | 默认冻结，只做必要修复 |
 | `pin-codex` | Codex 直接开发的 Pin Web | Codex 的 Web 主开发线 |
 | `pin-cc` | Codex 指挥、CC 执行的 Pin Web | CC 结果的独立验证线 |
-| `pin` | 后续原生客户端 | 与 Web 分支独立演进，不直接合并 Web 实现 |
+| `pin-macOS` | 后续原生客户端 | 与 Web 分支独立演进，不直接合并 Web 实现 |
 
 长期分支不直接写功能。每次任务必须从对应长期分支创建临时分支：
 
@@ -21,7 +21,7 @@
 codex/designpeek/<topic>
 codex/pin-web/<topic>
 cc/pin-web/<topic>
-native/pin/<topic>
+native/pin-macOS/<topic>
 fix/<product>/<topic>
 ```
 
