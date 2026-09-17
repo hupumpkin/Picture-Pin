@@ -1,0 +1,14 @@
+# SPM 构建产物
+.build/
+
+# 打包产物与离屏截图
+build/
+
+# Xcode 直接打开本工程时产生的本地文件
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+.swiftpm/
+
+# macOS
+.DS_Store
