@@ -71,6 +71,8 @@ rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS"
 cp "$project_dir/.build/$config/PinNative" "$app_dir/Contents/MacOS/PinNative"
 cp "$project_dir/AppBundle/Info.plist" "$app_dir/Contents/Info.plist"
+mkdir -p "$app_dir/Contents/Resources"
+cp -R "$project_dir/AppBundle/Resources/." "$app_dir/Contents/Resources/"
 
 # 直接改 plist，不再维护三份内容几乎相同的文件——那样迟早会改漏一份。
 plutil -replace CFBundleIdentifier -string "$bundle_id" "$app_dir/Contents/Info.plist"

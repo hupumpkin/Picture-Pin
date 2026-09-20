@@ -122,6 +122,21 @@ struct CanvasScene: Equatable, Sendable {
         return CanvasSceneChange(removed: removed.map(\.id), order: elements.map(\.id))
     }
 
+    /// 把元素放回它原来的位置与层序（删除的逆操作）。
+    ///
+    /// 与 `insert` 的唯一区别是**不重新分配 `order`**：撤销一次删除，
+    /// 层序必须回到删除之前。已经在场景里的 id 跳过（幂等），
+    /// 所以重复调用不会插出两份。
+    @discardableResult
+    mutating func restore(_ restored: [CanvasElement]) -> CanvasSceneChange {
+        let missing = restored.filter { self.element($0.id) == nil }
+        guard !missing.isEmpty else { return .none }
+        elements.append(contentsOf: missing)
+        elements.sort { $0.order < $1.order }
+        revision += 1
+        return CanvasSceneChange(inserted: missing, order: elements.map(\.id))
+    }
+
     /// 移动或缩放一个元素。直接操控走这条路径，立即生效，不加缓动。
     @discardableResult
     mutating func setFrame(_ frame: CGRect, for id: CanvasElementID) -> CanvasSceneChange {
@@ -130,6 +145,26 @@ struct CanvasScene: Equatable, Sendable {
         elements[index].frame = frame
         revision += 1
         return CanvasSceneChange(updated: [elements[index]])
+    }
+
+    /// 一次改一组元素的外框。多选拖动与多选缩放走这条。
+    ///
+    /// 与逐个 `setFrame` 的区别**只在通知次数**：这里产生**一份**变更，
+    /// 三个消费者（渲染器、SwiftUI、落库排队）各被通知一次，而不是每个元素一次。
+    /// 改动本身逐条判断，外框没变的不进 `updated`——"拖了但没动"不该产生噪音。
+    @discardableResult
+    mutating func setFrames(_ assignments: [CanvasElementFrame]) -> CanvasSceneChange {
+        var change = CanvasSceneChange()
+        for assignment in assignments {
+            guard let index = elements.firstIndex(where: { $0.id == assignment.id }) else { continue }
+            guard elements[index].frame != assignment.frame else { continue }
+            elements[index].frame = assignment.frame
+            change.updated.append(elements[index])
+        }
+        guard !change.isEmpty else { return .none }
+        revision += 1
+        // order 未变：只动外框。
+        return change
     }
 
     /// 把元素提到最前。选择与拖拽的常见后续动作。

@@ -61,8 +61,16 @@ struct CanvasRenderUpdate: Equatable, Sendable {
 /// 本批次只定义结构，选择与吸附由 Codex 在批次 C/D 填充
 /// （路线图 §3.2：吸附放到交互精修批次）。
 struct CanvasOverlay: Equatable, Sendable {
-    /// 选中元素的外框，世界坐标。
+    /// 选中元素的外框，世界坐标。逐元素一条边框。
     var selectionFrames: [CGRect] = []
+    /// 要显示四角手柄的那个外框，世界坐标。`nil` = 不显示手柄。
+    ///
+    /// 由**选择逻辑**决定（本轮：恰好选中一个元素时才有），而不是渲染器
+    /// 按 `selectionFrames` 猜。多选时也画四个角手柄的话，拖动它们会发生什么
+    /// 是没有定义的——手柄的画法与它背后的操作必须同时定义。
+    var handleFrame: CGRect?
+    /// 框选矩形，世界坐标。`nil` = 当前没有在框选。
+    var marquee: CGRect?
     /// 对齐辅助线，世界坐标。
     var guides: [Guide] = []
 
@@ -76,7 +84,9 @@ struct CanvasOverlay: Equatable, Sendable {
     }
 
     static let empty = CanvasOverlay()
-    var isEmpty: Bool { selectionFrames.isEmpty && guides.isEmpty }
+    var isEmpty: Bool {
+        selectionFrames.isEmpty && handleFrame == nil && marquee == nil && guides.isEmpty
+    }
 }
 
 /// 渲染器协议。

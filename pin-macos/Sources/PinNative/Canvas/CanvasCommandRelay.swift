@@ -14,6 +14,7 @@ final class CanvasCommandRelay {
     var zoomStep: ((CGFloat) -> Void)?
     var zoomTo: ((CGFloat) -> Void)?
     var focusContent: (() -> Void)?
+    var focusSelection: (() -> Void)?
 
     /// 是否已经挂载。工具栏用它禁用按钮，避免点了没反应。
     var isAttached: Bool { zoomStep != nil }

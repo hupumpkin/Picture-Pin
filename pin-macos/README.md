@@ -79,24 +79,30 @@ PIN_DEV_PROFILE=codex swift run PinNative
 ```text
 Sources/PinNative/
 ├── App/            进程入口、工作台状态、数据目录隔离
-├── Canvas/         画布内核（本批次的重点）
+├── Canvas/         画布内核
 │   ├── Camera.swift            三套坐标空间的换算，纯数学，无动画
 │   ├── SceneGraph.swift        元素集合的唯一真相来源，不依赖 CALayer
 │   ├── HitTest.swift           命中与空间查询，选择/吸附/辅助线共用
 │   ├── CanvasRenderer.swift    渲染器协议 + 增量更新描述
 │   ├── LayerRenderer.swift     CALayer 实现：worldLayer + overlayLayer
-│   ├── CanvasHostView.swift    NSViewRepresentable 宿主，画背景网格、转发输入
+│   ├── CanvasHostView.swift    NSViewRepresentable 宿主，画背景网格、转发输入、收拖入
 │   ├── CanvasInputEvent.swift  输入值对象（**不 import AppKit**，可脱离测试）
-│   ├── CanvasInputAdapter.swift 输入协议 + CanvasContext（给 Codex 替换的接缝）
-│   ├── CanvasSceneCommand.swift 场景命令：输入层改场景的唯一入口
+│   ├── CanvasInputAdapter.swift 输入协议 + CanvasContext（冻结接缝）
 │   ├── CanvasEventTranslation.swift NSEvent → 值对象，唯一依赖 AppKit 的一步
-│   ├── Board.swift             画布集合与当前画布——多画布的预留接口
-│   └── MinimalInputAdapter.swift 临时最小实现（批次 B 由 Codex 取代）
-├── Assets/         图片管线：ImageProvider 接缝、解码缓存、合成素材（批次 B1）
+│   ├── InputController.swift   接缝的实现：平移/缩放/指针/框选入口
+│   ├── SelectionController.swift 选择集与直接操控：拖动、缩放、撤销
+│   ├── SelectionGeometry.swift 选框与手柄的几何，纯数学
+│   ├── CanvasSceneCommand.swift 场景命令：输入层改场景的唯一入口
+│   ├── CanvasCommandRelay.swift 工具栏 → 画布宿主的命令通道
+│   ├── MotionConfiguration.swift 手感参数（动效一族归 Codex）
+│   └── Board.swift             画布集合与当前画布——多画布的预留接口
+├── Assets/         图片管线：ImageProvider 接缝、解码缓存、驻留与内存压力、合成素材
+├── Import/         采集通道：三条入口合流到 ImportCoordinator（政策、粘贴、临时文件）
+├── Persistence/    库：SQLite 打开/迁移/快照/素材落盘，以及损坏库的隔离与诊断
 ├── Materials/      素材来源：描述 + 内容提供者——加来源只改这里
 ├── Design/         设计令牌：间距、圆角、字号、图标尺寸、配色
 ├── UI/             来源栏（贴边实色）、浮在画布上的素材面板与工具条、玻璃表面封装
-└── Tools/          --selftest 与 --snapshot，都不进正式交互路径
+└── Tools/          --selftest / --snapshot / --library-report，都不进正式交互路径
                     另有 DevelopmentCommands.swift（**整个文件在 #if DEBUG 里**）
 ```
 

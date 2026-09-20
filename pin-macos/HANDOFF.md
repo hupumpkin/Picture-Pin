@@ -820,6 +820,95 @@ LRU 加一路向前的扫描会退化成**反复重解**——刚解好的那张
 - **真实系统内存压力没测过**：报告第 4.6 节那份压力序列是**构造的**。
 - 遮挡感知的适配仍未做（`focusContent` / `fit` 按整个视口居中）。
 
+## 批次 C1：最小采集闭环（文件选择器导入 → 库 → 画布 → 恢复）
+
+### 数据层（`Persistence/`，§3.1）
+
+- **GRDB 只允许出现在 `Persistence/` 一处**（`Package.swift` 写死的规矩）：
+  `AssetRecord` 因此不是 `PersistableRecord`，映射写在 `AssetStore` 里；
+  `LibraryDatabase` 不叫 `Database`（和 GRDB 自己的类型撞名，撞一次之后每个人
+  都得先想一秒"这是哪个 Database"）。
+- **读在主线程、写走 writer 队列**指的是"谁在等"：GRDB 异步接口把闭包丢到自己的
+  队列池，主线程发起、主线程不等。同步 `try pool.read {}` 会阻塞当前线程，读起来
+  却没有任何"我在做 I/O"的暗示。
+- **`DatabasePool` + WAL**：多读一写互不阻塞。代价是 `-wal`/`-shm` 两个文件存在
+  是约定的一部分（C2 的损坏处理要连它们一起改名）。busyMode `.timeout(5)` 不假设
+  "同一个库不会被两个进程写"。
+- **迁移失败停下来报错，不建空库**——建空库会把用户唯一一份数据换成一个看起来
+  正常的空库。外键开 RESTRICT（元素引用素材不许删）+ CASCADE（删画布连带删元素）。
+- **素材复制原字节、不转码**：转码会改格式、尺寸、EXIF 方向，而这三样正是必测项；
+  磁盘文件名是 UUID（重复导入不合并，同名不同内容的两份素材必须能同时存在）。
+- **恢复走 `LibrarySnapshot`**：启动一次读全量，之后主线程只读内存。定位表
+  （`SnapshotAssetLocator`）启动时装一次，解码路径上不许有数据库查询。
+- **调度器**（`SceneWriteScheduler`）：改动一来就落、安静期合并，`drainGeneration`
+  闸门让过气任务醒来即退场；`requeueCount` 不是 0 就说明有写入失败过。
+
+### 真解码（`Assets/FileImageProvider.swift`，§3.2）
+
+- **双协议**：`ImageProvider`（画布渲染与素材面板缩略图共用）+ `ImageFileProbing`
+  （导入探针）。协议变量身上拿不回具体类型，各建一个实现的话两条路径就分叉了。
+- **LOD 档位是离散 2 的幂**，也是缓存键的一部分；**从不放大超过原图**（24×24 的
+  源配 32pt 目标就是 24×24）。缩略图路径只调 `CGImageSourceCreateThumbnailAtIndex`，
+  不整幅解码再缩。
+- **三态分开**：`.missing`（文件不在，自动重试是白问，只走手动）、`.failed`（读
+  不了）、`.cancelled`（取消）。失败文案统一在 `unifiedDecodeFailure` 一处常量。
+
+### 采集通道（`Import/ImportCoordinator.swift`，§3.3）
+
+- 三条通道（文件选择器 / 拖入 / 粘贴）共用一条流水线：**判大小 → 收字节 → 读属性
+  → 入库 → 插画布**。C2 只加各自的采集动作。
+- **政策必须在复制之前**：`ingest` 的失败清理防不了"整个文件复制完了才说不要"。
+  超限（默认最长边 > 40,000 或总像素 > 2 亿）一个字节都不落盘，所以也没有半成品
+  可删。上限在 `ImportPolicy` / `DecodePolicy` 集中定义。
+- **逐个处理**：一批里一张坏了，另外九十九张照常进来。结果字典按传入 URL 键控；
+  **要按传入顺序读结果，用原来的 urls 数组去索引**——Swift Dictionary 不保证迭代
+  顺序（§3.6 的摘要第一版栽在这上面，自检随进程哈希种子随机红）。
+- 导入即装定位表（先装再摆画布——摆上画布的下一帧渲染器就来问，装晚了第一帧就
+  是红色占位）。落画布按整批网格排在视口中心区域，slot 是批内位置，先到的文件
+  不会随后面到来而挪动。
+
+### 面板接真（`Materials/ScreenshotMaterialProvider.swift`，§3.4）
+
+- **`AssetStoreLookup` 迟到接线**：来源目录在 init 时就建，那时库还没打开；
+  `prepareStorage()` 把 store 放进来，提供者每次 refresh 问这个 box。
+- **`ThumbnailGate`（硬上限 4）**：取消安全的并发闸门——排队中被取消的请求返回
+  false、不占位子、不解码。与"`LazyVStack` 只给可见行发请求"是两道独立的限制。
+- 行视图 `.task(id: item.id)` 只发可见行的请求；目标尺寸 = 32pt × displayScale。
+- **面板命中契约**：玻璃背景 `fill(.clear)` 是命中透明的，`.contentShape(Rectangle())`
+  让整个浮层在所有内容状态下都接点击——点面板空白处不许穿透成平移画布。
+
+### 恢复（§3.5）
+
+- 文件被人在访达里删掉：元素仍在、还引用原素材、解码落 `.missing`（占位与提示的
+  入口）。**不静默删元素**——静默删等于替用户做了决定。
+
+### 基础 UI（§3.6）
+
+- 工具栏最左导入按钮（`square.and.arrow.down`，与"看画布/看素材"用分隔线隔开），
+  导入进行中禁用；`.fileImporter` 多选；`ImportStatusToast` 浮在工具条上方，结果
+  4 秒自动消失（`.task(id:)` 计时，新状态取消旧计时）。
+- **`ImportFeedback` 是纯值 + 纯函数**：界面不读 outcomes 字典，只读摘要；第一条
+  失败按用户选文件的先后（`orderedBy`），提示胶囊只有两行，数字承担"有几张被拒"。
+- 语义色 `DesignTokens.Surface.success` / `.warning`：两处裸 `.orange`（失败横幅、
+  面板失败态）已收编。`// 精校留白` 只有一处（胶囊停留时长与消失方式），其余
+  留白规则（token、`Copy`、不写死尺寸、两层视图）见 `BATCH_C_TASK.md` §3.6。
+
+### 调试入口（§3.7）
+
+- `--import <path>... [--data-dir <目录>]`：不开窗口走真导入流水线，先
+  `prepareStorage` + `restore`（摆上的是恢复出来的那块画布），逐文件结果 + 总数
+  + 写调度器账本；退出码全成 0 / 任一被拒 1。默认打真实 profile，`--data-dir`
+  打临时目录。
+- `--library-report [--data-dir <目录>]`：库结构（版本/表/索引/列）、库文件
+  （journal + 主文件与 -wal/-shm 三个大小）、内容（画布/元素/素材计数 + 逐条素材
+  清单）。`render` 是纯函数，格式进自检——送审的人会默认"没打出来的就是没有"。
+
+### 测试素材（§7 第 11 条）
+
+`TestAssets/` 的 4 个文件按 `pin-macos-test-NN-` 改名（字节未动，哈希逐条核对）。
+**改名的原因**：聊天通道上传会把图转码成 JPEG 并封顶 2000 点，拿转码副本建测试库
+会把格式、尺寸、EXIF 方向三样都测成假的。用途与哈希见 `TestAssets/README.md`。
+
 ## 数据目录与 profile（审核 P2-02 的返修）
 
 | profile | 目录 | 谁在用 |
@@ -858,9 +947,12 @@ LRU 加一路向前的扫描会退化成**反复重解**——刚解好的那张
 ```bash
 cd pin-macos
 swift run PinNative                        # 开发运行
-swift run PinNative --selftest             # 380 项断言，返回码 0 = 通过
+swift run PinNative --selftest             # 626 项断言，返回码 0 = 通过
 swift run PinNative --snapshot             # 离屏截图到 build/snapshots/（debug 8 张，release 6 张）
 swift run -c release PinNative --perf-report   # B2 性能实测（必须 release），输出即 PERF_REPORT_B2.md
+swift run PinNative --import a.png b.png   # 无 UI 导入到真实 profile（§3.7）
+swift run PinNative --import a.png --data-dir /tmp/验收库   # 导入到指定目录
+swift run PinNative --library-report       # 打印真实 profile 的库状态（§3.7）
 PIN_DEV_PROFILE=codex swift run PinNative  # 切到自己的数据目录
 ./scripts/build-app.sh release codex       # 打包到 build/Pin-codex.app
 ./scripts/build-app.sh debug cc-debug      # 打包实测包 build/Pin-cc-debug.app

@@ -142,6 +142,21 @@ struct AppEnvironment {
         exit(2)
     }
 
+    /// `--data-dir` 覆盖（§3.7 调试入口用）：`--import` 与 `--library-report`
+    /// 默认打真实 profile（供人工验收），自动化与快照流程传这个参数打临时目录。
+    static func overrideDirectory(in arguments: [String]) -> URL? {
+        guard let index = arguments.firstIndex(of: "--data-dir"),
+              index + 1 < arguments.count else { return nil }
+        return URL(fileURLWithPath: arguments[index + 1])
+    }
+
+    /// 带数据目录覆盖的启动解析。有覆盖时 profile 只是报告里的一个标签，
+    /// 目录本身已由调用方指定；没有覆盖时走普通启动闸门。
+    static func resolveForLaunch(dataDirectoryOverride: URL?) -> AppEnvironment {
+        guard let dataDirectoryOverride else { return resolveForLaunch() }
+        return AppEnvironment(profile: .cc, dataDirectory: dataDirectoryOverride)
+    }
+
     /// 各子目录。批次 A 只创建目录结构，不写入任何内容——空库就是本批次的交付物。
     var boardsDirectory: URL { dataDirectory.appendingPathComponent("boards", isDirectory: true) }
     var assetsDirectory: URL { dataDirectory.appendingPathComponent("assets", isDirectory: true) }

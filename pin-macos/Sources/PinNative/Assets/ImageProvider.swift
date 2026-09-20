@@ -25,16 +25,33 @@ struct LODTier: Hashable, Sendable {
     /// 留着只占缓存。
     static let maximumLevel = 5
 
+
     /// 覆盖给定像素需求所需的**最小**档位，也就是"够清晰但不过剩"的那一档。
+    ///
+    /// ## 解码上限（§3.9 第 3 条）
+    ///
+    /// 结果**永远不会比 `DecodePolicy.maximumTier(forOriginal:)` 更细**：
+    /// 200 MP 的图允许入库，但全档永远不解——上限收在阶梯本身，渲染器
+    /// （选档）与提供者（解码）共用同一个 `fitting`，两边的口径天然一致。
+    /// 要是在解码前临时夹一刀，就会出现"记账说是这一档、像素其实是更粗
+    /// 那一档"的错账。
     ///
     /// - Parameters:
     ///   - required: 当前显示实际需要多少像素（显示尺寸 × backingScaleFactor）。
     ///   - original: 原图像素尺寸。**必须由元数据提供，不能先解码再量**——
     ///     如果为了知道尺寸而解码一次，选档位这件事本身就没有意义了。
-    static func fitting(_ required: CGSize, original: CGSize) -> LODTier {
+    ///   - policy: 解码上限。默认是 §3.9 定的值；自检注入小上限来实测这条规则。
+    static func fitting(
+        _ required: CGSize,
+        original: CGSize,
+        policy: DecodePolicy = DecodePolicy()
+    ) -> LODTier {
+        // 上限先算：参数不合法时的兜底档位也必须是它——返回 `.full` 会让一张
+        // 超限的图回到"全档解码"，正是上限要挡的事。
+        let cap = policy.maximumTier(forOriginal: original)
         guard required.width > 0, required.height > 0,
               original.width > 0, original.height > 0
-        else { return .full }
+        else { return cap }
 
         var level = 0
         while level < maximumLevel {
@@ -46,7 +63,9 @@ struct LODTier: Hashable, Sendable {
             }
             level += 1
         }
-        return LODTier(level: level)
+        let tier = LODTier(level: level)
+        // `level` 越小档越细；比上限细就退回上限那一档。
+        return tier.level < cap.level ? cap : tier
     }
 
     /// 该档位对应的解码像素尺寸。
@@ -79,6 +98,9 @@ struct LODTier: Hashable, Sendable {
     ///
     /// 返回值保证两件事：**永远不比 `demanded` 更粗**（不会停在糊的档上）、
     /// **永远不比 `current` 更细**（不会因为一次抖动就跳去解一张更大的图）。
+    /// 解码上限（§3.9 第 3 条）在此一并生效：`demanded` 经 `fitting` 已被上限
+    /// 夹过，迟滞走出的结果（从 `current` 出发只会更粗，但 `current` 理论上
+    /// 可能细于上限）在返回前也再夹一次——阶梯的产物**永远不会越过上限**。
     ///
     /// ## 为什么这个函数是纯的
     ///
@@ -89,9 +111,11 @@ struct LODTier: Hashable, Sendable {
         _ required: CGSize,
         original: CGSize,
         from current: LODTier?,
-        headroom: CGFloat
+        headroom: CGFloat,
+        policy: DecodePolicy = DecodePolicy()
     ) -> LODTier {
-        let demanded = fitting(required, original: original)
+        let cap = policy.maximumTier(forOriginal: original)
+        let demanded = fitting(required, original: original, policy: policy)
         guard let current, demanded.level > current.level else { return demanded }
 
         let margin = max(1, headroom)
@@ -106,7 +130,7 @@ struct LODTier: Hashable, Sendable {
             else { break }
             candidate = next
         }
-        return candidate
+        return candidate.level < cap.level ? cap : candidate
     }
 }
 
@@ -121,6 +145,55 @@ struct LODTier: Hashable, Sendable {
 /// （路线图 §5），把它收在这一处，渲染器就不用再关心。
 struct ImageMetadata: Equatable, Sendable {
     let pixelSize: CGSize
+}
+
+/// 一个**磁盘上的图片文件**的属性。导入时读它，此时素材还没入库、还没有 `AssetID`。
+///
+/// ## 为什么不能直接用 `ImageMetadata`
+///
+/// 因为它比 `ImageMetadata` 多一样东西：`ImageMetadata` 是**渲染器要的**（"这张图
+/// 该按什么比例摆"），而方向已经被消化掉了。导入要的是**文件里写着什么**——
+/// 方向值要原样存进库，这样"我们把它摆成了什么样"和"文件里写的是什么"两件事
+/// 都留了痕。方向解析错了的时候，只有原始值能把它们对上（路线图 §5 把 EXIF
+/// 列为必测项，而必测项没留原始值就等于没有证据）。
+struct ImageFileFacts: Equatable, Sendable {
+    /// **摆正之后**的像素尺寸（与 `ImageMetadata.pixelSize` 同一口径）。
+    let pixelSize: CGSize
+    /// 文件里写着的 EXIF 方向值。1 = 不旋转；没有 EXIF 时按 1 记。
+    let exifOrientation: Int
+}
+
+/// 探一个**还没入库的文件**。读不出来返回 `nil`（不是能解码的图片、文件损坏）。
+///
+/// 与 `ImageProvider` 分开是因为问的问题不同：那个问"这个素材的像素在哪"，
+/// 这个问"这个文件是什么"。实现是同一个（`FileImageProvider`），但它不该
+/// 因此被塞进渲染器要看的那个协议里——渲染路径不需要、也不该有"文件"这个概念。
+@MainActor
+protocol ImageFileProbing: AnyObject {
+    func probe(_ url: URL) async -> ImageFileFacts?
+}
+
+/// `AssetID` → 磁盘位置。
+///
+/// ## 为什么是一个协议，而不是让提供者去查库
+///
+/// **解码路径上不允许出现数据库查询。** 这条路每次扫描都会被走到（见
+/// `LayerRenderer.requestImage`），而一次查询就是一次 I/O——主线程预算（§2.4）
+/// 会在"画布上有一百个元素"时当场破掉。所以查库只发生在启动那一次，结果装进
+/// 一个字典（`SnapshotAssetLocator`），解码路径上只有一次字典查找。
+@MainActor
+protocol AssetFileLocator: AnyObject {
+    func fileURL(for asset: AssetID) -> URL?
+}
+
+/// 已经在内存里的一张图，以及它是哪一档。
+///
+/// 两个都要：图层要拿它当 `contents`，而渲染器记账时要知道**它到底是哪一档**
+/// ——记错档的后果是下一次扫描以为"屏幕上已经是目标档了"，于是永远不去要
+/// 那张该要的图，画面一直糊着。
+struct CachedImage: Sendable {
+    let image: CGImage
+    let tier: LODTier
 }
 
 /// 一次图片请求的结果。
@@ -188,8 +261,33 @@ enum ImageRequestResult: Sendable {
 ///   （画布元素 + 面板缩略图），实现要保证不会重复解码同一档位。
 @MainActor
 protocol ImageProvider: AnyObject {
+    /// 像素驻留账本。**渲染器往它申报"图层拿了哪一档"，实现（缓存）读它决定淘汰。**
+    ///
+    /// 为什么走协议暴露而不是各自 new 一个：账本一旦有两份，"图层的持有"和
+    /// "缓存的淘汰"就各看各的表，而症状是"预算看着正常、内存一直涨"——正是
+    /// 独立复审报回来的缺陷 ③。挂在提供者上，二者在结构上就是同一个实例，
+    /// 想接错也接不出来。
+    var residency: ImageResidency { get }
+
     /// 读素材属性。素材不存在时返回 `nil`。
     func metadata(for asset: AssetID) async -> ImageMetadata?
+
+    /// 同步取一张**已经在内存里**的、不比 `tier` 更细的图。没有就返回 `nil`。
+    ///
+    /// **绝不允许在这里解码**：它在一次同步的可见性扫描里被调用，解码会让
+    /// §2.4 的主线程预算当场破掉。它的用途只有一个——§3.9 第 1 条的代价那一半：
+    /// 元素拖回视口时先贴一张已经在内存里的小图（先糊一下），再等目标档。
+    func cachedImage(for asset: AssetID, atMost tier: LODTier) -> CachedImage?
+
+    /// 这个素材已经**离开视口**：放掉它没人拿着的高档位，只留一张便宜的。
+    ///
+    /// §3.9 第 1 条的触发点。**只有渲染器知道"它出去了"**，所以由它调用；
+    /// 留哪一档、留多大，是实现（缓存）的事。
+    ///
+    /// 为什么不是"任何一次持有归零都放"：从场景里删掉的元素（换画布）走的是
+    /// 另一条路——缓存按素材共享、与画布无关，顺手放掉的后果是换一次画布把
+    /// 所有图重新解码一遍。这两件事在调用点上是分开的，在实现里也就分得开。
+    func releaseOffscreenPixels(of asset: AssetID)
 
     /// 取指定档位的像素。
     ///

@@ -54,12 +54,53 @@ final class BoardStore {
     private var cameras: [Board.ID: CanvasCamera]
     private var selections: [Board.ID: Set<CanvasElementID>]
 
-    init(board: Board = Board(name: "画布 1")) {
-        self.boards = [board]
-        self.activeBoardID = board.id
-        self.scenes = [board.id: CanvasScene(boardID: board.id)]
-        self.cameras = [board.id: .initial]
-        self.selections = [board.id: []]
+    /// 落库的入口。**每一条改动路径都要经过它**（见 `LibraryWriting`）。
+    ///
+    /// 刻意是 `weak`：库比这个 store 活得久（退出时要靠它刷盘），反过来持有
+    /// 会让"谁先销毁"变成一个问题。而它**不该**是可选链上的一次静默跳过——
+    /// 没接线的表现是"改了但重启就没了"，所以自检里有一条断言直接钉住
+    /// "接线之后每一次改动都落库了"。
+    @ObservationIgnored weak var library: (any LibraryWriting)?
+
+    /// 从快照恢复。
+    ///
+    /// 空快照 = 全新空库：**建一块默认画布**。这一步在这里而不是在
+    /// `LibrarySnapshot` 里，是因为"至少有一块画布"是这个类型的不变量
+    /// （所有取当前画布的访问器都依赖它），而快照只是"库里有什么"的忠实记录
+    /// ——库里一块画布都没有，那是真的。
+    ///
+    /// 相机与选中**不从快照里读**：两者都不持久化（§7 第 6、7 条）。
+    /// 快照里根本没有它们，所以这里也没有任何"顺手恢复一下"的余地。
+    init(snapshot: LibrarySnapshot = .empty) {
+        if snapshot.boards.isEmpty {
+            let board = Board(name: "画布 1")
+            self.boards = [board]
+            self.activeBoardID = board.id
+            self.scenes = [board.id: CanvasScene(boardID: board.id)]
+            self.cameras = [board.id: .initial]
+            self.selections = [board.id: []]
+        } else {
+            self.boards = snapshot.boards
+            self.activeBoardID = snapshot.boards[0].id
+            var scenes: [Board.ID: CanvasScene] = [:]
+            var cameras: [Board.ID: CanvasCamera] = [:]
+            var selections: [Board.ID: Set<CanvasElementID>] = [:]
+            for board in snapshot.boards {
+                scenes[board.id] = CanvasScene(
+                    boardID: board.id,
+                    elements: snapshot.elements(in: board.id)
+                )
+                cameras[board.id] = .initial
+                selections[board.id] = []
+            }
+            self.scenes = scenes
+            self.cameras = cameras
+            self.selections = selections
+        }
+    }
+
+    convenience init(board: Board) {
+        self.init(snapshot: LibrarySnapshot(boards: [board], elements: [:], assets: []))
     }
 
     // MARK: - 当前画布
@@ -125,6 +166,10 @@ final class BoardStore {
         cameras[board.id] = .initial
         selections[board.id] = []
         activeBoardID = board.id
+        // 落库放在**这个函数里面**，不是让调用方自己记得调。`addBoard` 有三个
+        // 调用点（工具栏、调试菜单、自检），漏掉一处的表现是"新建的画布重启就没了，
+        // 而里面的元素还在库里的孤儿状态"——那种错要查很久。
+        library?.persist(board: board, sort: boards.count - 1)
         return board
     }
 
@@ -133,6 +178,7 @@ final class BoardStore {
               let index = boards.firstIndex(where: { $0.id == id })
         else { return }
         boards[index].name = trimmed
+        library?.persist(board: boards[index], sort: index)
     }
 
     /// 画布名的唯一规则：去掉首尾空白，空的算没给。返回 `nil` 表示"这个名字不能用"。
@@ -161,6 +207,8 @@ final class BoardStore {
         if activeBoardID == id {
             activeBoardID = boards[min(index, boards.count - 1)].id
         }
+        // `remaining` 一起交出去：删掉一块之后，后面那些的 `sort` 都往前挪了一位。
+        library?.removeBoard(id, remaining: boards)
         return true
     }
 
@@ -171,15 +219,58 @@ final class BoardStore {
         return "画布 \(index)"
     }
 
+    // MARK: - 恢复
+
+    /// 用快照里的内容**整体替换**当前状态。
+    ///
+    /// ## 为什么它可以替换，而不是逐块合并
+    ///
+    /// 因为它只在启动时跑一次，那一刻内存里的东西全部是"还没有内容的默认值"
+    /// ——没有任何改动会被它盖掉。加一条"启动之后再调"的路就会有这个问题，
+    /// 所以调用点只有一个（`WorkspaceModel.restore`）。
+    ///
+    /// ## 相机与选中被**重置**，不是被恢复
+    ///
+    /// 两者都不持久化（§7 第 6、7 条）。这里显式写一遍而不是"什么都不做"：
+    /// 不写的话，将来某次改动把恢复挂到别处时，它们会带着**上一个库的**相机
+    /// 和选中活下来——那种错看着像随机发生的。
+    ///
+    /// 空快照**不动**当前状态：空库要保留 `init` 建的那块默认画布，
+    /// 否则启动之后界面上一块画布都没有（`boards` 永不为空是不变量）。
+    func restore(from snapshot: LibrarySnapshot) {
+        guard !snapshot.boards.isEmpty else { return }
+        boards = snapshot.boards
+        activeBoardID = snapshot.boards[0].id
+        var scenes: [Board.ID: CanvasScene] = [:]
+        var cameras: [Board.ID: CanvasCamera] = [:]
+        var selections: [Board.ID: Set<CanvasElementID>] = [:]
+        for board in snapshot.boards {
+            scenes[board.id] = CanvasScene(
+                boardID: board.id,
+                elements: snapshot.elements(in: board.id)
+            )
+            cameras[board.id] = .initial
+            selections[board.id] = []
+        }
+        self.scenes = scenes
+        self.cameras = cameras
+        self.selections = selections
+    }
+
     // MARK: - 回写
 
     /// 画布宿主改过场景后回写。宿主是直接操控期间的权威版本，这里只跟着走。
     ///
     /// 按 `scene.boardID` 而不是 `activeBoardID` 落库：场景自己带着它属于哪块画布，
     /// 用当前画布去接会在切换的那一帧把两块画布的内容串在一起。
+    ///
+    /// **这里落的是差异，不是整份场景**：`Change` 是算好的（`CanvasScene.change`），
+    /// 拿它去写库就只动真正变了的那几条。整份重写在 1000 元素的画布上是每次
+    /// 一千条 UPDATE。
     func applyScene(_ scene: CanvasScene) {
-        guard scenes[scene.boardID] != nil, scenes[scene.boardID] != scene else { return }
+        guard let previous = scenes[scene.boardID], previous != scene else { return }
         scenes[scene.boardID] = scene
+        library?.persist(scene.change(from: previous), in: scene.boardID)
     }
 
     func applySelection(_ selection: Set<CanvasElementID>, for id: Board.ID) {

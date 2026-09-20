@@ -68,9 +68,12 @@ struct MaterialSource: Identifiable {
     /// 和一个视图。加了 case 之后 `MaterialPanel` 会编译不过，直到新形态被实现——
     /// 这正是想要的：遗漏是编译错误，不是运行时空面板。
     enum Surface: Sendable {
-        /// 条目列表（截图、字体、花瓣的采集结果）。
+        /// 条目列表（截图、字体）。
         case collection
-        // 花瓣的内嵌浏览将在这里加 `case browser`（路线图 §6：网页悬停采集另分阶段）。
+        /// 内嵌浏览面：面板里直接跑一个网页。
+        ///
+        /// 采集结果**不在这里列**——采到的图直接进画布，画布本身就是素材的落点。
+        case browser
     }
 }
 
@@ -103,13 +106,21 @@ enum MaterialSourceCatalog {
 
     /// 建出本轮注册的来源。
     ///
-    /// - Parameter environment: 数据目录的来源。批次 C 在这里把它交给真实提供者，
-    ///   例如 `ScreenshotMaterialProvider(directory: environment.assetsDirectory)`。
-    ///   现在还没有提供者用它，但**参数必须现在就在**——接口晚一步到位，
-    ///   第一批实现就会绕开它。
+    /// - Parameters:
+    ///   - environment: 数据目录的来源。真实提供者拿它定位素材目录。
+    ///   - assets: 素材库的迟到接线（`AssetStoreLookup`）。目录在模型 init 时就建，
+    ///     那时库还没打开；`prepareStorage()` 之后 store 经这个盒子送到
+    ///     截图提供者手里。测试只验证目录结构时可以不传——那时刷新落在
+    ///     「素材库还没准备好」。
+    ///   - images: 共享图片管线。截图源缩略图走它（面板与画布同一份缓存）；
+    ///     不传则缩略图请求返回 `nil`，行视图退回图标占位。
     ///
     /// - Returns: 至少一条。调用方（`WorkspaceModel`）依赖这一点来选定默认来源。
-    static func make(environment: AppEnvironment) -> [MaterialSource] {
+    static func make(
+        environment: AppEnvironment,
+        assets: AssetStoreLookup? = nil,
+        images: (any ImageProvider)? = nil
+    ) -> [MaterialSource] {
         [
             MaterialSource(
                 id: screenshots,
@@ -117,7 +128,9 @@ enum MaterialSourceCatalog {
                 systemImage: "photo.on.rectangle.angled",
                 emptyTitle: "还没有截图",
                 emptyMessage: "截图会出现在这里，可拖到画布排版。",
-                provider: PlaceholderMaterialProvider(environment: environment)
+                provider: ScreenshotMaterialProvider(
+                    environment: environment, assets: assets, images: images
+                )
             ),
             MaterialSource(
                 id: huaban,
@@ -125,6 +138,7 @@ enum MaterialSourceCatalog {
                 systemImage: "square.grid.2x2",
                 emptyTitle: "还没有采集",
                 emptyMessage: "在 Pin 里浏览花瓣，采集的图片会进到这里。",
+                surface: .browser,
                 provider: PlaceholderMaterialProvider(environment: environment)
             ),
             MaterialSource(

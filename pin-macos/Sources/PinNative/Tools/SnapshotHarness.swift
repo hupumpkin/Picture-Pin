@@ -52,7 +52,7 @@ enum SnapshotHarness {
             for appearance in Appearance.allCases {
                 let name = "workspace-\(Int(size.width))x\(Int(size.height))-\(appearance.suffix).png"
                 let url = outputDirectory.appendingPathComponent(name)
-                if let data = render(size: size, appearance: appearance) {
+                if let data = await render(size: size, appearance: appearance) {
                     try? data.write(to: url)
                     written.append(name)
                 } else {
@@ -78,7 +78,7 @@ enum SnapshotHarness {
         #if DEBUG
         let contentSize = CGSize(width: 1280, height: 800)
         let contentName = "workspace-content-\(Int(contentSize.width))x\(Int(contentSize.height))-light.png"
-        if let data = render(size: contentSize, appearance: .light, withContent: true) {
+        if let data = await render(size: contentSize, appearance: .light, withContent: true) {
             try? data.write(to: outputDirectory.appendingPathComponent(contentName))
             written.append(contentName)
         } else {
@@ -92,7 +92,7 @@ enum SnapshotHarness {
         // 这一张是用户实测发现越界之后补的——之前"图片显示正常"的截图其实
         // 每天都在掩盖同一个 bug。
         let overflowName = "workspace-overflow-\(Int(contentSize.width))x\(Int(contentSize.height))-light.png"
-        if let data = render(size: contentSize, appearance: .light,
+        if let data = await render(size: contentSize, appearance: .light,
                              withContent: true, fittingContent: false) {
             try? data.write(to: outputDirectory.appendingPathComponent(overflowName))
             written.append(overflowName)
@@ -132,12 +132,21 @@ enum SnapshotHarness {
         appearance: Appearance,
         withContent: Bool = false,
         fittingContent: Bool = true
-    ) -> Data? {
-        let model = WorkspaceModel(environment: .resolve())
+    ) async -> Data? {
+        // 快照要画出真像素，就得有真库（C1 起画布像素来自素材库）。在**临时
+        // 目录**里开一份：快照工具绝不能往任何 profile 的真实数据目录里写
+        // 演示素材——那会让"截一张图"变成"污染一次开发数据"。
+        guard let scratch = makeScratchDataDirectory() else { return nil }
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let model = WorkspaceModel(
+            environment: AppEnvironment(profile: .cc, dataDirectory: scratch)
+        )
+        await model.recoverStorage()
+        guard model.storageError == nil else { return nil }
         #if DEBUG
         if withContent {
-            DevelopmentCommands.insertDemoBatch(into: model)
-            DevelopmentCommands.insertDemoBatch(into: model)
+            await DevelopmentCommands.insertDemoBatch(into: model)
+            await DevelopmentCommands.insertDemoBatch(into: model)
         }
         if withContent, fittingContent {
             // 把相机套到内容上。不这么做的话这批素材比视口宽，截图只能看到
@@ -172,8 +181,10 @@ enum SnapshotHarness {
         hostingView.layoutSubtreeIfNeeded()
 
         // SwiftUI 的首轮布局有一部分是异步的（尤其是 scroll/glass 这类需要
-        // 尺寸的容器）。转两圈 runloop 让它落定，否则截到的是中间态。
-        RunLoop.current.run(until: Date().addingTimeInterval(0.35))
+        // 尺寸的容器），解码也是异步的（真提供者 §3.2）。睡一小段让它们落定，
+        // 否则截到的是中间态——主 actor 挂起期间主 runloop 照常转，
+        // 布局与解码任务的回调都能排上队。
+        try? await Task.sleep(for: .seconds(0.35))
         hostingView.layoutSubtreeIfNeeded()
         hostingView.displayIfNeeded()
 
@@ -197,6 +208,18 @@ enum SnapshotHarness {
         hostingView.cacheDisplay(in: CGRect(origin: .zero, size: size), to: rep)
 
         return rep.representation(using: .png, properties: [:])
+    }
+
+    /// 渲染用的临时数据目录（快照的"库"开在这里，用完即删）。
+    private static func makeScratchDataDirectory() -> URL? {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pin-snapshot-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
+        } catch {
+            return nil
+        }
     }
 
     /// 输出目录默认在工程内的 `build/snapshots/`，可用 `--snapshot-dir` 覆盖。

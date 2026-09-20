@@ -65,7 +65,7 @@ final class SyntheticImageProvider: ImageProvider {
     /// 两个调用点同时穿透到解码。
     private var inFlight: [ImageCache.Key: Task<GenerationOutcome, Never>] = [:]
 
-    init(assets: [Asset], cache: ImageCache = ImageCache()) {
+    init(assets: [Asset], cache: ImageCache = ImageCache(residency: ImageResidency())) {
         self.assets = Dictionary(
             assets.map { ($0.id, $0.pixelSize) },
             uniquingKeysWith: { first, _ in first }
@@ -75,9 +75,23 @@ final class SyntheticImageProvider: ImageProvider {
 
     // MARK: - ImageProvider
 
+    /// 账本就是缓存那一本。**不另建一个**：两本账的症状是"预算看着正常、
+    /// 内存一直涨"，而那正是这一层要修的缺陷（见 `ImageResidency`）。
+    var residency: ImageResidency { cache.residency }
+
     func metadata(for asset: AssetID) async -> ImageMetadata? {
         guard let pixelSize = assets[asset] else { return nil }
         return ImageMetadata(pixelSize: pixelSize)
+    }
+
+    /// 同步探测缓存里有没有"不比给定档位更细"的一张。**不解码**（协议约定）。
+    func cachedImage(for asset: AssetID, atMost tier: LODTier) -> CachedImage? {
+        guard let found = cache.bestAvailableImage(for: asset, atMost: tier) else { return nil }
+        return CachedImage(image: found.image, tier: found.tier)
+    }
+
+    func releaseOffscreenPixels(of asset: AssetID) {
+        cache.demoteUnheldTiers(of: asset)
     }
 
     func image(for asset: AssetID, targetPixelSize: CGSize) async -> ImageRequestResult {

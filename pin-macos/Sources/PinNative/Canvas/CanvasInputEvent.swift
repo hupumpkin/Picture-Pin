@@ -105,6 +105,24 @@ struct CanvasMagnifyInput: Sendable, Hashable {
     var modifiers: CanvasModifiers
 }
 
+/// 鼠标指针形状。
+///
+/// 输入层决定"现在该显示哪个"，宿主负责真的去设——`NSCursor` 是 AppKit 的，
+/// 而这个文件刻意不 import AppKit。所以这里是一个纯枚举，与
+/// `CanvasEventTranslation` 那条边界同一个道理。
+enum CanvasCursor: Sendable, Hashable {
+    /// 默认箭头。
+    case arrow
+    /// 十字。悬停在变换手柄上时用：手柄的命中区比它看起来大一圈，
+    /// 用默认箭头的话用户不知道自己已经抓住了。
+    case crosshair
+    /// 张开的手。按住空格进入待平移状态时用——**按下之前**就要给出信号，
+    /// 否则用户不知道自己按的空格到底生效了没有。
+    case openHand
+    /// 握住的手。正在拖动画布时用。
+    case closedHand
+}
+
 /// 键盘按下。
 struct CanvasKeyInput: Sendable, Hashable {
     /// 已按修饰键处理过的字符。方向键等没有可打印字符的键为空串。

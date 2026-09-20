@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 画布宿主：把 AppKit 画布嵌进 SwiftUI。
 ///
@@ -28,6 +29,8 @@ struct CanvasHostView: NSViewRepresentable {
     /// 旧画布的选择里存的是旧画布的元素 ID，留在宿主里会照着空位置画选择框。
     /// 存进 `BoardStore` 再传下来，切画布就自动换成了新画布的那一份。
     let selection: Set<CanvasElementID>
+    let tool: CanvasTool
+    let showsGrid: Bool
     let configuration: MotionConfiguration
     /// 像素从哪来。由 `WorkspaceModel` 持有并注入——**渲染器不自己建一个**，
     /// 否则素材面板和画布会各缓存一份解码结果（见 `ImageCache` 的说明）。
@@ -40,6 +43,23 @@ struct CanvasHostView: NSViewRepresentable {
     let onSelectionChange: (Set<CanvasElementID>) -> Void
     /// 直接操控过程中持续回调，用于工具栏的缩放百分比等显示。
     let onCameraChange: (CanvasCamera) -> Void
+    /// 东西被拖进画布（§4 第 1 条）。参数是**载荷**与**落点**（世界坐标）。
+    ///
+    /// ## 为什么是 `ClipboardPayload` 而不是 `[URL]`
+    ///
+    /// 拖进画布的现在有两种东西：访达拖来的**文件**，和网页里拖来的**位图**。
+    /// 后者没有原文件——浏览器给的是图片数据，落盘前得先编码（见
+    /// `ClipboardPayload`）。这正是粘贴通道早就遇到过的那两种形态，所以这里
+    /// 直接复用同一个类型，而不是再给拖入单开一条"位图路径"：两条路径分开的话，
+    /// 尺寸上限、失败清理、落点换算就会各写一遍，然后慢慢走散。
+    ///
+    /// 返回的是「收不收」，不是「导没导成」：`performDragOperation` 必须当场
+    /// 回答，而导入是异步的。返回 `true` 只表示"这批东西我接下了"，
+    /// 具体成败由提示胶囊负责——失败也绝不会静默。
+    let onDrop: (ClipboardPayload, CGPoint) -> Bool
+    /// ⌘V（§4 第 2 条）。**没有落点参数**：粘贴落在视口中心，
+    /// 剪贴板里的东西本来就没有"从哪儿拖来"这回事。
+    let onPaste: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -51,7 +71,9 @@ struct CanvasHostView: NSViewRepresentable {
             commands: commands,
             onSceneChange: onSceneChange,
             onSelectionChange: onSelectionChange,
-            onCameraChange: onCameraChange
+            onCameraChange: onCameraChange,
+            onDrop: onDrop,
+            onPaste: onPaste
         )
     }
 
@@ -59,25 +81,34 @@ struct CanvasHostView: NSViewRepresentable {
         let view = CanvasHostNSView()
         view.context = context.coordinator
         context.coordinator.attach(to: view)
+        context.coordinator.setTool(tool)
+        view.showsGrid = showsGrid
         return view
     }
 
     func updateNSView(_ view: CanvasHostNSView, context: Context) {
         context.coordinator.onCameraChange = onCameraChange
+        context.coordinator.onDrop = onDrop
+        context.coordinator.onPaste = onPaste
         context.coordinator.setMotionConfiguration(configuration)
         context.coordinator.applyExternalCamera(camera)
         context.coordinator.applyExternalScene(scene)
         // 场景之后：换画布时先让渲染器重建内容，再落新的选择。
         context.coordinator.applyExternalSelection(selection)
+        context.coordinator.setTool(tool)
+        view.showsGrid = showsGrid
     }
 
     @MainActor
     final class Coordinator: CanvasContext {
         private weak var view: CanvasHostNSView?
         private let renderer: LayerRenderer
-        /// 路线图 §4 规则 3：临时最小输入适配器，批次 B 由 Codex 的
-        /// `InputController.swift` 替换。替换点就是这一行。
-        private let input: CanvasInputAdapter = MinimalInputAdapter()
+        /// 输入路由与直接操控。
+        ///
+        /// 路线图 §4 规则 3 的替换点就是这一行：宿主只认 `CanvasInputAdapter`
+        /// 协议，换实现不必改其他任何地方。批次 A 的临时件
+        /// （`MinimalInputAdapter`）已经删除——禁止两套事件逻辑并存。
+        private let input = InputController()
 
         /// 场景的唯一真相来源（宿主这一侧）。
         ///
@@ -95,6 +126,10 @@ struct CanvasHostView: NSViewRepresentable {
         private let commands: CanvasCommandRelay
         private let onSceneChange: (CanvasScene) -> Void
         private let onSelectionChange: (Set<CanvasElementID>) -> Void
+        /// 拖入与粘贴的落点（§4）。`var` 的理由和 `onCameraChange` 一样：
+        /// SwiftUI 每次刷新都可能给出新的闭包。
+        var onDrop: (ClipboardPayload, CGPoint) -> Bool = { _, _ in false }
+        var onPaste: () -> Void = {}
         /// 最近一次对外报告过的相机，用于识别 updateNSView 传来的值是不是回音。
         private var reportedCamera: CanvasCamera
 
@@ -138,6 +173,10 @@ struct CanvasHostView: NSViewRepresentable {
                 change = scene.remove(ids)
             case .setFrame(let frame, let id):
                 change = scene.setFrame(frame, for: id)
+            case .setFrames(let assignments):
+                change = scene.setFrames(assignments)
+            case .restore(let elements):
+                change = scene.restore(elements)
             case .bringToFront(let ids):
                 change = scene.bringToFront(ids)
             }
@@ -179,6 +218,9 @@ struct CanvasHostView: NSViewRepresentable {
             isApplyingExternalSelection = true
             self.selection = selection
             isApplyingExternalSelection = false
+            // 覆盖层由输入层提交。外部改完选择必须让它重算一次，否则
+            // 表现是"选中了但画布上没有任何框"——点素材面板、换画布都会走到这里。
+            input.selectionDidChange(context: self)
         }
 
         var overlay: CanvasOverlay = .empty {
@@ -196,14 +238,24 @@ struct CanvasHostView: NSViewRepresentable {
             selection: Set<CanvasElementID>,
             configuration: MotionConfiguration,
             images: any ImageProvider,
+            retryPolicy: ImageRetryPolicy = .default,
             commands: CanvasCommandRelay,
             onSceneChange: @escaping (CanvasScene) -> Void,
             onSelectionChange: @escaping (Set<CanvasElementID>) -> Void,
-            onCameraChange: @escaping (CanvasCamera) -> Void
+            onCameraChange: @escaping (CanvasCamera) -> Void,
+            // 这两个有默认值：性能报告与自检里那些"只想量一次提交"的协调器
+            // 不接界面，给它们各写一遍空闭包只会淹没真正的参数。
+            onDrop: @escaping (ClipboardPayload, CGPoint) -> Bool = { _, _ in false },
+            onPaste: @escaping () -> Void = {}
         ) {
             self.scene = scene
             self.selection = selection
-            self.renderer = LayerRenderer(camera: camera, configuration: configuration, images: images)
+            self.renderer = LayerRenderer(
+                camera: camera,
+                configuration: configuration,
+                images: images,
+                retryPolicy: retryPolicy
+            )
             // 起点是"同一块画布的空场景"：这样首次 `syncScene()` 会把已有元素
             // 全部判为 inserted，非空初始场景也能一次画出来。
             self.syncedScene = CanvasScene(boardID: scene.boardID)
@@ -212,12 +264,17 @@ struct CanvasHostView: NSViewRepresentable {
             self.onSceneChange = onSceneChange
             self.onSelectionChange = onSelectionChange
             self.onCameraChange = onCameraChange
+            self.onDrop = onDrop
+            self.onPaste = onPaste
             self.reportedCamera = camera
             renderer.setMotionConfiguration(configuration)
         }
 
         func attach(to view: CanvasHostNSView) {
             self.view = view
+            // 输入层要在渲染器之前拿到 context：`attach` 里可能补一次全量同步，
+            // 那时覆盖层要根据选择重算一次，输入层得已经能读到场景。
+            input.attach(to: self)
             renderer.attach(to: view.layer ?? CALayer())
             renderer.setBackingScaleFactor(view.window?.backingScaleFactor ?? 2)
             connectCommands()
@@ -245,10 +302,51 @@ struct CanvasHostView: NSViewRepresentable {
                 guard let self else { return }
                 input.focus(on: scene.contentBounds, context: self)
             }
+            commands.focusSelection = { [weak self] in
+                self?.focusSelection()
+            }
+        }
+
+        func setTool(_ tool: CanvasTool) {
+            input.setTool(tool, context: self)
+        }
+
+        func focusSelection() {
+            let bounds = scene.elements
+                .filter { selection.contains($0.id) }
+                .reduce(CGRect.null) { $0.union($1.frame) }
+            guard !bounds.isNull else { return }
+            input.focus(on: bounds, context: self)
         }
 
         func requestRedraw() {
             view?.needsDisplay = true
+        }
+
+        /// 输入层给的是语义值，`NSCursor` 是这里的事。
+        ///
+        /// 去重放在宿主而不是输入层：光标是**窗口级**状态，指针离开视图时
+        /// 由 `CanvasHostNSView.mouseExited` 直接恢复成箭头（那一刻输入层
+        /// 什么都不知道），所以缓存必须和"谁真正设的光标"放在一起。
+        func setCursor(_ cursor: CanvasCursor) {
+            guard cursor != lastCursor else { return }
+            lastCursor = cursor
+            cursor.nsCursor.set()
+        }
+
+        private var lastCursor: CanvasCursor = .arrow
+
+        /// 指针离开画布时调用。恢复箭头并清缓存，让下次进入时能重新设一次。
+        func resetCursorOnExit() {
+            lastCursor = .arrow
+            NSCursor.arrow.set()
+        }
+
+        /// 视图外观变化（深浅色切换）。覆盖层的颜色是写进 CALayer 的静态
+        /// `CGColor`，不会自己跟着变——不刷新的话，深色模式下的选择框还是
+        /// 浅色那一版，几乎看不见。
+        func viewAppearanceChanged() {
+            renderer.appearance = view?.effectiveAppearance ?? NSAppearance.currentDrawing()
         }
 
         func setMotionConfiguration(_ configuration: MotionConfiguration) {
@@ -274,7 +372,15 @@ struct CanvasHostView: NSViewRepresentable {
             guard scene != self.scene else { return }
             let boardChanged = scene.boardID != self.scene.boardID
             self.scene = scene
-            if boardChanged { discardOverlay() }
+            if boardChanged {
+                discardOverlay()
+                // 换画布时清空撤销栈。
+                //
+                // 栈里那几条记的是**另一块画布**上的元素 ID 与外框。留着的话，
+                // ⌘Z 会把改动应用到看不见的地方——用户看到的只是"撤销没反应"，
+                // 而重做栈里躺着的那份状态已经和当前画布无关了。
+                undoManager?.removeAllActions()
+            }
             syncScene()
         }
 
@@ -352,9 +458,12 @@ struct CanvasHostView: NSViewRepresentable {
             let pointer = CanvasEventTranslation.pointer(
                 event, in: view, camera: renderer.camera, button: button
             )
-            if button == .left {
+            switch button {
+            case .left, .other:
+                // 中键和左键走**同一条**入口：是不是平移由输入层按按键决定，
+                // 宿主不替它判断。右键才是另一回事（上下文菜单）。
                 input.pointerDown(pointer, context: self)
-            } else {
+            case .right:
                 input.secondaryPointerDown(pointer, context: self)
             }
             view.needsDisplay = true
@@ -362,7 +471,7 @@ struct CanvasHostView: NSViewRepresentable {
 
         func pointerDragged(_ event: NSEvent, button: CanvasPointerButton) {
             guard let view else { return }
-            guard button == .left else { return }
+            guard button != .right else { return }
             input.pointerDragged(
                 CanvasEventTranslation.pointer(
                     event, in: view, camera: renderer.camera, button: button
@@ -374,7 +483,7 @@ struct CanvasHostView: NSViewRepresentable {
 
         func pointerUp(_ event: NSEvent, button: CanvasPointerButton) {
             guard let view else { return }
-            guard button == .left else { return }
+            guard button != .right else { return }
             input.pointerUp(
                 CanvasEventTranslation.pointer(
                     event, in: view, camera: renderer.camera, button: button
@@ -397,6 +506,59 @@ struct CanvasHostView: NSViewRepresentable {
         /// 返回 `false` 表示未消费，宿主按常规向上传递。
         func keyDown(_ event: NSEvent) -> Bool {
             input.keyDown(CanvasEventTranslation.key(event), context: self)
+        }
+
+        /// 空格平移靠它退出——见 `CanvasInputAdapter.keyUp` 的说明。
+        func keyUp(_ event: NSEvent) {
+            input.keyUp(CanvasEventTranslation.key(event), context: self)
+        }
+
+        // MARK: 菜单命令的落点（由 CanvasHostNSView 的响应链入口转发过来）
+
+        /// 「全选」。走的是和键盘完全相同的那条路。
+        @discardableResult
+        func selectAll() -> Bool {
+            input.keyDown(
+                CanvasKeyInput(characters: "a", keyCode: 0, modifiers: [.command], isARepeat: false),
+                context: self
+            )
+        }
+
+        /// 撤销 / 重做。
+        ///
+        /// 撤销栈是**窗口的** `UndoManager`（`⌘Z` 的常规路径），这里只是转发 +
+        /// 让覆盖层跟着重算一遍：撤销改的是外框，而覆盖层是按外框画出来的，
+        /// 不重算的话框会停在原地，图却已经回去了。
+        func undo() {
+            undoManager?.undo()
+            input.selectionDidChange(context: self)
+            requestRedraw()
+        }
+
+        func redo() {
+            undoManager?.redo()
+            input.selectionDidChange(context: self)
+            requestRedraw()
+        }
+
+        // MARK: - 拖入与粘贴（§4 第 1、2 条）
+
+        /// 一批东西落在画布上。
+        ///
+        /// 视图坐标 → 世界坐标的换算在这里做，因为**只有这里同时知道相机和
+        /// 视图**。落到 `GridPlacement` 的必须是世界坐标：给视图点的话，
+        /// 缩放 50% 时用户把图放在光标下，图会出现在两倍远的地方。
+        ///
+        /// - Returns: 收不收。空的不收——返回 `true` 的话系统会播放下落动画，
+        ///   而画布上什么都不会出现，那比明确拒收更让人困惑。
+        func drop(_ payload: ClipboardPayload, atViewPoint viewPoint: CGPoint) -> Bool {
+            guard !payload.isEmpty else { return false }
+            return onDrop(payload, camera.viewToWorld(viewPoint))
+        }
+
+        /// ⌘V。剪贴板读什么、怎么入库都不在这里——画布只负责"用户在这儿按的"。
+        func paste() {
+            onPaste()
         }
 
         func flagsChanged(_ event: NSEvent) {
@@ -428,17 +590,56 @@ struct CanvasHostView: NSViewRepresentable {
         /// 渲染器最近收到的覆盖层。
         var renderedOverlay: CanvasOverlay { renderer.lastOverlay }
 
+        /// 画布上**真的画出来**了几个选中框。读的是 `CAShapeLayer.path`。
+        var renderedSelectionBorderCount: Int { renderer.renderedSelectionBorderCount }
+
+        /// 手柄路径里真的有几个月牙方块。多选或没选中时必须是 0。
+        var renderedHandleCount: Int { renderer.renderedHandleCount }
+
+        /// 框选矩形现在画没画。
+        var renderedMarqueeVisible: Bool { renderer.renderedMarqueeVisible }
+
+        /// 选中框在视图坐标里的位置（读的是真实路径）。
+        var renderedSelectionBorderBounds: CGRect { renderer.renderedSelectionBorderBounds }
+
         /// 某个元素图层里实际的像素尺寸。读的是 `layer.contents`，
         /// 不是渲染器的记账——否则断言是自证。
         func renderedImageSize(of id: CanvasElementID) -> CGSize? {
             renderer.sublayerImageSize(of: id)
         }
 
-        /// 某个元素当前显示的档位。
+        /// 某个元素图层里**真的有**的像素是哪一档。像素还没到就是 `nil`。
         func renderedTier(of id: CanvasElementID) -> LODTier? { renderer.sublayerTier(of: id) }
+
+        /// 某个元素正在要（在飞）或已经显示的那一档。断言问"请求发出去了吗"用它。
+        func requestedTier(of id: CanvasElementID) -> LODTier? { renderer.requestedTier(of: id) }
+
+        /// 这个元素还在等像素（在飞或等重试）。
+        func isAwaitingImage(_ id: CanvasElementID) -> Bool { renderer.isAwaitingImage(id) }
+
+        /// 这个元素的图层现在铺的是失败底色吗（用户看到的那个信号）。
+        func showsFailurePlaceholder(_ id: CanvasElementID) -> Bool {
+            renderer.sublayerShowsFailurePlaceholder(of: id)
+        }
+
+        /// 这个元素图层现在还有没有底色（占位色与失败色都算）。
+        /// 真图到位之后它必须是 `false`——透明区域前不许垫东西。
+        func hasBackingColor(_ id: CanvasElementID) -> Bool {
+            renderer.sublayerHasBackingColor(of: id)
+        }
 
         /// 取不到像素的元素及原因。
         var renderedImageFailures: [CanvasElementID: String] { renderer.imageFailures }
+
+        /// 取不到像素、且元素还在场景里的那些。界面靠它决定显不显示"重新加载"。
+        var renderedFailedImageIDs: Set<CanvasElementID> { renderer.failedImageIDs }
+
+        /// 手动重新加载某个元素的图片。元素级的重试入口。
+        func retryImage(for id: CanvasElementID) { renderer.retryImage(for: id) }
+
+        /// 手动重新加载全部失败的图片。返回重试了几个。
+        @discardableResult
+        func retryAllFailedImages() -> Int { renderer.retryAllFailedImages() }
 
         /// 走一次完整的「外部场景 → 渲染器」路径。自检用它验证 `updateNSView` 那条路。
         func applySceneFromOutside(_ scene: CanvasScene) { applyExternalScene(scene) }
@@ -486,15 +687,107 @@ struct CanvasHostView: NSViewRepresentable {
             input.focus(on: worldRect, context: self)
             return renderer.camera
         }
+
+        // MARK: 自检探针（选择与直接操控）
+        //
+        // 与上面那组同理：交值对象给同一个适配器，走的是和真实事件完全相同的
+        // 那条路。断言因此能覆盖"点中谁、拖到哪、撤销退到哪"，而不必真的动鼠标。
+
+        @discardableResult
+        func handlePointerDown(_ input: CanvasPointerInput) -> CanvasCamera {
+            pointer(input, .down)
+            return renderer.camera
+        }
+
+        func handlePointerDragged(_ input: CanvasPointerInput) {
+            pointer(input, .dragged)
+        }
+
+        func handlePointerUp(_ input: CanvasPointerInput) {
+            pointer(input, .up)
+        }
+
+        /// 交一次**未按键的悬停**。光标反馈走这一条。
+        func handlePointerMoved(_ input: CanvasPointerInput) {
+            self.input.pointerMoved(input, context: self)
+        }
+
+        @discardableResult
+        func handleKeyDown(_ input: CanvasKeyInput) -> Bool {
+            self.input.keyDown(input, context: self)
+        }
+
+        func handleKeyUp(_ input: CanvasKeyInput) {
+            self.input.keyUp(input, context: self)
+        }
+
+        private func pointer(_ input: CanvasPointerInput, _ phase: PointerPhase) {
+            switch phase {
+            case .down: self.input.pointerDown(input, context: self)
+            case .dragged: self.input.pointerDragged(input, context: self)
+            case .up: self.input.pointerUp(input, context: self)
+            }
+        }
+
+        private enum PointerPhase { case down, dragged, up }
+
+        /// 最近一次设上去的光标。断言用它验证手柄反馈。
+        var currentCursor: CanvasCursor { lastCursor }
+
+        /// 现在是不是在拖动画布。
+        var isPanningCanvas: Bool { input.isPanning }
+
+        /// 待平移状态（空格按住）。
+        var isSpacePanReady: Bool { input.isSpacePanReady }
+
+        /// 有没有缓动在播。断言用它验证"直接操控打断程序动画"。
+        var isAnimatingCamera: Bool { input.isAnimatingCamera }
+
+        /// 正在缩放元素（不是拖动、不是平移）。
+        var isResizingElement: Bool { input.selectionController.isResizingElement }
+
+        /// 正在拖动元素。
+        var isMovingElements: Bool { input.selectionController.isDirectManipulating }
     }
+}
+
+/// 画布在响应链上对外承诺的动作。
+///
+/// ## 为什么要把选择器收成一处
+///
+/// 菜单（SwiftUI 的 `Commands`）和画布（`CanvasHostNSView`）是**两处独立写的
+/// 代码**，它们之间唯一的接头就是这个选择器字符串。写歪一个字符的话，两边都还
+/// 在、编译也过、自检也绿，只是菜单发出去的那一下**落到空处**——撤销点不动、
+/// 快捷键也没反应，而且没有任何报错。
+///
+/// 这不是假设：这里原先菜单发的是无冒号的 `undo`（那是 `UndoManager` 自己的
+/// 方法，而 `UndoManager` **不在响应链上**）。画布上那条路一直是对的，
+/// 只是没人走到它。
+///
+/// 收成一处之后，"两边写得不一致"这个可能就从根上没有了。剩下的那一半
+/// ——"这个选择器到底能不能被画布接住、接住之后真的会撤销吗"——由自检走
+/// **真窗口的响应链**问一遍（`SelfTest.responderChainActionsAreWired`）。
+enum CanvasResponderAction {
+
+    /// 带冒号的 `undo:`。
+    ///
+    /// **冒号是有意义的**：它表示"带一个 sender 参数"，与无参的
+    /// `UndoManager.undo` 是两个不同的选择器。选错那个的代价是静默的。
+    static let undo = #selector(CanvasHostNSView.undo(_:))
+
+    static let redo = #selector(CanvasHostNSView.redo(_:))
 }
 
 /// AppKit 画布表面。
 ///
 /// 只做三件事：转发输入、绘制背景网格、把尺寸变化告诉协调器。
 /// 所有画布状态都在协调器与渲染器里，视图本身不持有相机。
-final class CanvasHostNSView: NSView {
+final class CanvasHostNSView: NSView, NSMenuItemValidation {
     weak var context: CanvasHostView.Coordinator?
+
+    var showsGrid = true {
+        didSet { if showsGrid != oldValue { needsDisplay = true } }
+    }
 
     /// 原点在左上、y 向下，与 `CanvasCamera` 的约定一致。
     override var isFlipped: Bool { true }
@@ -511,6 +804,12 @@ final class CanvasHostNSView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // 拖入落点（§4 第 1 条）。第一版只登记 `.fileURL`，理由是"位图那条路和
+        // 粘贴是同一件事"。现在不成立了：**网页里的图拖出来是位图数据，没有
+        // 原文件**（见 `ClipboardPayload`），而它走的是拖入这条手势，不是粘贴。
+        // 不登记这些类型的表现是拖拽进来光标一直是禁止符，`draggingEntered`
+        // 根本不会被调用——连失败都记不下来。
+        registerForDraggedTypes(Array(Self.acceptedDragTypes))
         // ## 这一行是必须的，不是优化
         //
         // `CALayer` 默认**不裁剪子层**，而画布是 `HStack` 里靠右的一个兄弟视图：
@@ -600,8 +899,42 @@ final class CanvasHostNSView: NSView {
         context?.pointerMoved(event)
     }
 
+    /// 指针离开画布：光标恢复成箭头。
+    ///
+    /// 在这里做而不是在输入层：离开视图不是一种"输入"，输入层收不到它，
+    /// 但它必须让光标恢复正常——否则指针移到素材面板上还顶着一个张开的手。
+    override func mouseExited(with event: NSEvent) {
+        context?.resetCursorOnExit()
+    }
+
+    /// 右键。**画布现在不做右键手势**（`pointerDown(button: .right)` 落到
+    /// `InputController` 的空分支），所以这一条专门的输入交给上下文菜单。
+    ///
+    /// 走 `super` 而不是自己弹菜单：`NSView` 的默认实现会取 `menu(for:)` 的结果
+    /// 并把它弹出来，自己再写一遍 `NSMenu.popUpContextMenu` 等于两处都能决定
+    /// "有没有菜单"。
+    ///
+    /// **将来要右键手势时**（比如右键拖动平移），得先按路线图 §4 规则 4 提接口
+    /// 提案：手势一旦消费右键，菜单就得挪到别的键或别的触发方式上，那是个产品
+    /// 决定，不该在这里悄悄发生。
     override func rightMouseDown(with event: NSEvent) {
-        context?.pointerDown(event, button: .right)
+        super.rightMouseDown(with: event)
+    }
+
+    /// 画布右键菜单。
+    ///
+    /// 现在只有一项「粘贴图片」。**不顺手加撤销/全选**：那些在菜单栏里都有、
+    /// 且各自有快捷键，右键菜单重复一遍只会让"这里该有什么"变得没有标准。
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let paste = NSMenuItem(
+            title: "粘贴图片", action: #selector(paste(_:)), keyEquivalent: ""
+        )
+        // 显式指定 target，不靠响应链：右键**不会**把第一响应者改到画布上
+        // （用户可能刚在地址栏里打过字），靠响应链找的话这一项在那种时候是灰的。
+        paste.target = self
+        menu.addItem(paste)
+        return menu
     }
 
     override func rightMouseDragged(with event: NSEvent) {
@@ -610,6 +943,18 @@ final class CanvasHostNSView: NSView {
 
     override func rightMouseUp(with event: NSEvent) {
         context?.pointerUp(event, button: .right)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        context?.pointerDown(event, button: .other)
+    }
+
+    override func otherMouseDragged(with event: NSEvent) {
+        context?.pointerDragged(event, button: .other)
+    }
+
+    override func otherMouseUp(with event: NSEvent) {
+        context?.pointerUp(event, button: .other)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -622,9 +967,148 @@ final class CanvasHostNSView: NSView {
         }
     }
 
+    /// 键盘松开。**空格平移必须靠它退出**，不能省。
+    override func keyUp(with event: NSEvent) {
+        context?.keyUp(event)
+    }
+
     override func flagsChanged(with event: NSEvent) {
         context?.flagsChanged(event)
     }
+
+    /// 深浅色切换。覆盖层颜色是写进 CALayer 的静态 `CGColor`，宿主得显式刷新。
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        context?.viewAppearanceChanged()
+    }
+
+    // MARK: - 响应链入口（菜单命令）
+    //
+    // 菜单项在 `PinNativeApp` 里用 `target: nil` 挂上，AppKit 沿响应链找到
+    // 第一响应者。画布是绘制区域的常规第一响应者，所以这几个方法要落在
+    // **视图**上——协调器不在响应链里。
+
+    /// `selectAll:` 是 `NSResponder` 已有的方法，所以要 `override`——
+    /// 这也正是它值得挂在这里的原因：⌘A 的默认路径本来就沿响应链找它。
+    override func selectAll(_ sender: Any?) {
+        context?.selectAll()
+    }
+
+    /// `paste:` 走的也是**标准选择器**（和 `selectAll:` 同一个道理）。
+    ///
+    /// 用标准选择器而不是自定义的，是为了让搜索框里的 ⌘V 仍然是"粘贴文字"：
+    /// 文本视图在响应链上离第一响应者更近，它先接住，根本轮不到这里。
+    /// 定义成自定义选择器再挂菜单快捷键的话，菜单会在响应链之前把 ⌘V 抢走，
+    /// 表现就是"在搜索框里按 ⌘V 粘出来一张图"。
+    @objc func paste(_ sender: Any?) {
+        context?.paste()
+    }
+
+    @objc func undo(_ sender: Any?) {
+        context?.undo()
+    }
+
+    @objc func redo(_ sender: Any?) {
+        context?.redo()
+    }
+
+    /// 菜单项的可用状态（变灰还是可点）。
+    ///
+    /// 走 `NSMenuItemValidation` 而不是 `NSResponder` 的重载：`NSView` 没有
+    /// `validateMenuItem`，AppKit 是通过这个协议在响应链上问的——
+    /// 写成 `override` 编译不过（第一版就是那么写的）。
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(undo(_:)): return context?.undoManager?.canUndo ?? false
+        case #selector(redo(_:)): return context?.undoManager?.canRedo ?? false
+        case #selector(selectAll(_:)): return !(context?.scene.isEmpty ?? true)
+        case #selector(paste(_:)): return Self.pasteboardHasImportableContent
+        default: return true
+        }
+    }
+
+    /// 剪贴板里有没有我们能收的东西。**只读类型，不读数据**——
+    /// 菜单每次打开都会问一遍，读整张位图（可能是几十 MB）只为决定一个
+    /// 菜单项的灰与不灰，代价完全不成比例。
+    ///
+    /// 文案上"能粘"和"粘成功"是两件事：这里说有，粘下去仍可能因为尺寸超限
+    /// 被拒——那时提示胶囊会说原因。宁可这样，也不要让菜单项在"其实能粘"
+    /// 的时候是灰的。
+    private static var pasteboardHasImportableContent: Bool {
+        let pasteboard = NSPasteboard.general
+        return pasteboard.canReadObject(forClasses: [NSURL.self])
+            || pasteboard.availableType(from: [.png, .tiff]) != nil
+    }
+
+    // MARK: - 拖入落点（§4 第 1 条）
+    //
+    // ## 为什么拖入接在 NSView 上，而不是 SwiftUI 的 `.dropDestination`
+    //
+    // 画布是 `NSViewRepresentable`，SwiftUI 的落点是加在**外层容器**上的：
+    // 事件会先到容器，落点坐标是容器的坐标，还得再换算回画布视图坐标——
+    // 多一次转换就多一个"差一个面板宽度"的机会。而 AppKit 这边本来就已经在
+    // 收鼠标事件了，`draggingLocation` 直接就是画布视图坐标。
+    //
+    // 素材面板那边是纯 SwiftUI，用的就是 `.dropDestination`（见 `MaterialPanel`）。
+
+    /// 拖动进入。返回的操作符决定光标上挂什么徽标：`.copy` 是加号。
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        dragLooksImportable(sender) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        // 每一帧都重算：拖动途中经过别的 App，剪贴板内容会变。
+        dragLooksImportable(sender) ? .copy : []
+    }
+
+    override func prepareForDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        dragLooksImportable(sender)
+    }
+
+    /// 松手。
+    ///
+    /// ## 剪贴板必须在这里**同步**读完
+    ///
+    /// `draggingPasteboard` 只在这一次拖放会话里有效。交给异步的导入流水线
+    /// （`Task { }` 在下一个主 actor 回合才跑）就等于去读一块已经被拆掉的板子，
+    /// 读出来是空——而失败表现是"拖进去什么都没发生"，非常难查。
+    ///
+    /// 读出来的 `ClipboardPayload` 里装的是 `Data`（值类型），带过这个边界是
+    /// 安全的，所以这里读完就把值交出去，不做任何耗时的事。
+    ///
+    /// ## 为什么不当场导入
+    ///
+    /// 这个方法必须立刻回答收不收，而导入是异步的。返回 `true` 只说"我接下了"，
+    /// 成败由提示胶囊事后汇报——失败也绝不会静默。
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        let payload = PasteboardReader(pasteboard: sender.draggingPasteboard).read()
+        guard !payload.isEmpty else { return false }
+        let point = convert(sender.draggingLocation, from: nil)
+        return context?.drop(payload, atViewPoint: point) ?? false
+    }
+
+    /// 这次拖拽里有没有我们收得下的东西。
+    ///
+    /// ## 只看类型，不读数据
+    ///
+    /// `draggingUpdated` 每一帧都会问一遍，而读数据要解码整张位图（网页上拖
+    /// 一张大图就是几十 MB）——只为决定光标上挂不挂那个加号徽标，代价完全
+    /// 不成比例。真正的读发生在 `performDragOperation`，那一次是必要的。
+    ///
+    /// ## 为什么要列这么多类型
+    ///
+    /// `registerForDraggedTypes` 按类型名**精确匹配**，不做协议一致性推导，
+    /// 所以列在下面的是"能不能收到这个拖拽"的全部依据。网页拖出来的图宣告的
+    /// 是 `public.png` / `public.jpeg` / `public.tiff`，访达给的是
+    /// `public.file-url`——这几类都在。
+    private func dragLooksImportable(_ sender: any NSDraggingInfo) -> Bool {
+        let types = sender.draggingPasteboard.types ?? []
+        return !Set(types).isDisjoint(with: Self.acceptedDragTypes)
+    }
+
+    /// 内部可见（不是 `private`）：自检拿真实的 WebKit 拖拽类型清单来钉它——
+    /// 这个集合被削掉一项，网页拖拽那条通道就静默消失，而界面不会报任何错。
+    static let acceptedDragTypes = PasteboardReader.acceptedDragTypes
 
     // MARK: - 背景网格
     //
@@ -642,6 +1126,8 @@ final class CanvasHostNSView: NSView {
 
         palette.background.setFill()
         dirtyRect.fill()
+
+        guard showsGrid else { return }
 
         let step = Self.gridStep(forZoom: camera.zoom)
         guard step > 0 else { return }
@@ -721,17 +1207,44 @@ final class CanvasHostNSView: NSView {
     }
 }
 
+/// `CanvasCursor → NSCursor` 的翻译。
+///
+/// 放在这个文件里是刻意的：`CanvasInputEvent.swift` 与两个控制器都不 import
+/// AppKit，所以"哪个指针长什么样"是宿主的决定。要改样式（比如把手柄上的
+/// 十字换成缩放箭头）只改这一处。
+extension CanvasCursor {
+    var nsCursor: NSCursor {
+        switch self {
+        case .arrow: NSCursor.arrow
+        case .crosshair: NSCursor.crosshair
+        case .openHand: NSCursor.openHand
+        case .closedHand: NSCursor.closedHand
+        }
+    }
+}
+
 /// 画布区域的配色。跟随系统外观，与 SwiftUI 侧的 `DesignTokens` 同源。
 struct CanvasPalette {
     let background: NSColor
     let gridLine: NSColor
     let originMark: NSColor
+    /// 选中外框与手柄描边。
+    let selectionBorder: NSColor
+    /// 手柄填充。
+    let handleFill: NSColor
+    /// 框选矩形的填充与描边。
+    let marqueeFill: NSColor
+    let marqueeBorder: NSColor
 
     static var current: CanvasPalette {
         CanvasPalette(
             background: NSColor(DesignTokens.Canvas.background),
             gridLine: NSColor(DesignTokens.Canvas.gridLine),
-            originMark: NSColor(DesignTokens.Canvas.originMark)
+            originMark: NSColor(DesignTokens.Canvas.originMark),
+            selectionBorder: NSColor(DesignTokens.Canvas.selectionBorder),
+            handleFill: NSColor(DesignTokens.Canvas.handleFill),
+            marqueeFill: NSColor(DesignTokens.Canvas.marqueeFill),
+            marqueeBorder: NSColor(DesignTokens.Canvas.marqueeBorder)
         )
     }
 }

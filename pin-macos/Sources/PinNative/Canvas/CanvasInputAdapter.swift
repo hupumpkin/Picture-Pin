@@ -77,10 +77,17 @@ protocol CanvasContext: AnyObject {
     /// 撤销的粒度与合并策略属于 `SelectionController`，本协议只提供通道。
     var undoManager: UndoManager? { get }
 
-    // MARK: - 重绘
+    // MARK: - 重绘与指针
 
     /// 请求宿主重绘背景（网格等非图层内容）。图层内容由渲染器自己负责。
     func requestRedraw()
+
+    /// 请求切换鼠标指针。
+    ///
+    /// 输入层决定"该显示哪个"（手柄上是十字、按住空格是张开的手），
+    /// 宿主负责把 `CanvasCursor` 翻成 `NSCursor` 并真的设上去——
+    /// 输入层不 import AppKit，这条边界和事件翻译是同一条。
+    func setCursor(_ cursor: CanvasCursor)
 }
 
 /// 画布输入适配器：宿主把翻译好的输入值对象交给他。
@@ -131,8 +138,22 @@ protocol CanvasInputAdapter: AnyObject {
     /// 键盘按下。返回 `true` 表示已消费，宿主不再向上传递。
     func keyDown(_ input: CanvasKeyInput, context: CanvasContext) -> Bool
 
+    /// 键盘松开。
+    ///
+    /// 存在的唯一理由是**空格平移**：空格是一个「按住期间生效」的模式，
+    /// 没有松开事件就退不出来——用户按一下空格，从此左键永远在平移，
+    /// 而且看不出为什么。`flagsChanged` 顶不上：空格不是修饰键。
+    func keyUp(_ input: CanvasKeyInput, context: CanvasContext)
+
     /// 仅修饰键按下 / 松开（没有伴随字符键）。
     func flagsChanged(_ modifiers: CanvasModifiers, context: CanvasContext)
+
+    /// 选择被**外部**改掉了（SwiftUI 侧推下来的：点素材面板、换画布）。
+    ///
+    /// 覆盖层由输入层提交，所以外部改完选择必须让输入层重算一次，
+    /// 否则表现是"选中了但画布上没有任何框"。输入层在这里只重算覆盖层，
+    /// 不反过来写 `selection`——那只会在 `updateNSView` 里制造回环。
+    func selectionDidChange(context: CanvasContext)
 
     // MARK: 程序化定位（工具栏与菜单）
     //

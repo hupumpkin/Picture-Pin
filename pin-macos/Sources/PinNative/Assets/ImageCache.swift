@@ -25,10 +25,9 @@ import Foundation
 @MainActor
 final class ImageCache {
 
-    struct Key: Hashable {
-        let asset: AssetID
-        let tier: LODTier
-    }
+    /// 缓存键 = 素材 × 档位。**与账本共用同一个类型**：两处各定义一个的话，
+    /// "缓存里有这一条"和"图层拿着这一档"就永远对不上号，而那正是缺陷 ③ 的形态。
+    typealias Key = ImageResidency.Key
 
     /// 一条缓存记录的账面占用。
     struct Entry: Equatable {
@@ -66,6 +65,35 @@ final class ImageCache {
 
     private(set) var byteBudget: Int
 
+    /// 像素驻留账本。缓存自己建一本（**缓存是唯一持有像素的地方**），并通过
+    /// `ImageProvider.residency` 交出去给渲染器申报——两边在结构上就是同一个
+    /// 实例。账本有两本才会出问题（缺陷 ③ 的形态），而那需要建两个缓存，
+    /// 那件事由"缓存要注入、不许各建一个"这条规矩挡着。
+    let residency: ImageResidency
+
+    /// 视口外的素材**最多留多少字节**。超出的档位一并不留（`nil` = 一档都不留）。
+    ///
+    /// §3.9 第 1 条的口径：视口外不留全尺寸，只留一张小到可以忽略的图，
+    /// 代价是拖回视口时先糊一下再变清晰。
+    ///
+    /// ## 为什么用字节而不是"第几档"
+    ///
+    /// 定档位（"一律留 1/8"）在两种极端上都错：小图（400×225）的 1/8 看不清是
+    /// 什么，而它整张全尺寸也才 0.36 MB；4K 的 1/8 是 0.5 MB，但同一张图的
+    /// 1/4 也才 2 MB——**一律按档位切，等于把"多大算小"这件事写死在一个与尺寸
+    /// 无关的数上**。按字节切，规则只有一句：留一张**便宜**的。
+    ///
+    /// 4 MB 的取法：4K 的 1/4（960×540）是 2.07 MB、iPhone 截图的 1/4 是
+    /// 0.65 MB，都落在里面；而 4K 的全尺寸是 31.6 MB，永远出局——"不留全尺寸"
+    /// 这条硬要求由这个数保证。
+    ///
+    /// ## 留下的这一张是**可牺牲的**
+    ///
+    /// 它没有任何图层拿着，所以淘汰时排在所有人前面（见 `evictIfNeeded`）：
+    /// 内存一紧，先丢的就是这些"糊的底图"，而重做它们的代价是一次小解码。
+    /// 这就是为什么"每个看过的素材留一张"不会失控——预算是硬的，它们是最软的。
+    var seedByteCeiling: Int? = 4 * 1024 * 1024
+
     private var entries: [Key: CGImage] = [:]
     private var costs: [Key: Int] = [:]
     /// 最近一次使用的时间戳。用单调计数器而不是 `Date`：同一毫秒内的多次访问
@@ -85,8 +113,14 @@ final class ImageCache {
     /// 报过压力"——没报过的话，"内存没有持续增长"这句话的证据强度是不一样的。
     private(set) var pressureResponses: [MemoryPressure] = []
 
-    init(byteBudget: Int = ImageCache.defaultByteBudget()) {
+    /// 因为"已经离开视口、没人再看"而放掉的档位条数与字节数（§3.9 第 1 条）。
+    /// 报告要能说出这一条到底省了多少——否则它只是一个说法。
+    private(set) var demotedTierCount = 0
+    private(set) var demotedBytes = 0
+
+    init(byteBudget: Int = ImageCache.defaultByteBudget(), residency: ImageResidency = ImageResidency()) {
         self.byteBudget = byteBudget
+        self.residency = residency
     }
 
     // MARK: - 读写
@@ -139,7 +173,36 @@ final class ImageCache {
 
     var count: Int { entries.count }
 
+    /// **缓存里**这些条目占多少字节。
+    ///
+    /// 它不等于真实占用：被图层拿着的那些像素即使不在这张表里也还活着。
+    /// 报告与预算要看 `residentBytes`；这个数只在自检里用来指认"缓存自己"的账。
     var totalBytes: Int { costs.values.reduce(0, +) }
+
+    /// **真实的像素占用**：缓存里的 ∪ 被图层拿着的，同一个键只算一次。
+    ///
+    /// 这就是 §2.3「总预算」的口径。两者取并集而不是相加：同一张 `CGImage`
+    /// 既在缓存里、又在图层里时只有一份像素，相加会把内存凭空算成两倍。
+    ///
+    /// 只在图层里、不在缓存里的那些（缓存淘汰过、或存之前图层就先拿到了）
+    /// 恰恰是 B2 看不见的那部分，所以并集里必须有它们。
+    var residentBytes: Int {
+        var total = costs.values.reduce(0, +)
+        // 只在图层里、不在缓存里的那些补进来；两边都有的**不重复计**
+        // （同一個 `CGImage`，只有一份像素）。
+        for (key, bytes) in residency.heldBytes where costs[key] == nil { total += bytes }
+        return total
+    }
+
+    /// 被图层拿着、但已经不在缓存里的字节数。
+    ///
+    /// 这是一个**诊断数字**：它大于 0 说明"缓存账面上的占用"低估了真实内存，
+    /// 而低估多少一眼可见。B2 的缺陷 ③ 就是让这个数字一直没人知道。
+    var layerOnlyBytes: Int {
+        residency.heldBytes.reduce(0) { partial, item in
+            costs[item.key] == nil ? partial + item.value : partial
+        }
+    }
 
     /// 某条记录的大小，供断言核对"档位是否真的省了内存"。
     func entry(for asset: AssetID, tier: LODTier) -> Entry? {
@@ -154,18 +217,24 @@ final class ImageCache {
         evictionCount = 0
     }
 
-    /// 一张 `CGImage` 的实际内存占用。
-    ///
-    /// 用 `bytesPerRow × height` 而不是 `width × height × 4`：前者是 CoreGraphics
-    /// 真正分配的行宽（可能带对齐填充），后者是我们**希望**它占的。
-    /// 预算按愿望算的话会低估，内存压力就来得比预期早。
+    /// 一张 `CGImage` 的实际内存占用。定义搬到了 `ImageResidency`——渲染器
+    /// 第一个拿到 `CGImage`，它也要算这个数；两处各写一份迟早会分叉。
     static func byteCost(of image: CGImage) -> Int {
-        image.bytesPerRow * image.height
+        ImageResidency.byteCost(of: image)
     }
 
     // MARK: - 淘汰
 
-    /// 超出预算就按最久未用淘汰。
+    /// 超出预算就淘汰——**先丢没人拿的**，同组内按最久未用。
+    ///
+    /// ## 为什么"先丢没人拿的"是这一条的重点
+    ///
+    /// 按纯 LRU 淘汰一个**正被图层拿着**的条目，一字节都省不下来：像素还在
+    /// 图层里（见 `ImageResidency`）。而它恰恰是最容易被误伤的——刚存进来的、
+    /// 正在看的图往往就是最"新"的那一条，一轮轮淘汰下去，最后只剩它们在
+    /// 互相顶，缓存腾不出空间，解码白做，然后下一次重绘再解一遍。
+    ///
+    /// 所以排序是两级：**没人拿的在前**，同组内才比最久未用。
     ///
     /// **单张图片本身大于预算时不淘汰它自己**：那会让一张大图永远进不了缓存，
     /// 每次重绘都重新解码——比多占一点内存糟得多。正确的做法是让它留着，
@@ -175,19 +244,95 @@ final class ImageCache {
     /// O(条数²)，而它跑的时机恰好是"刚存进一张大图、缓存已经满了"——
     /// 也就是最不该在主线程上多花时间的时候。见 §2.4 的主线程预算。
     private func evictIfNeeded() {
-        var excess = totalBytes - byteBudget
+        var excess = residentBytes - byteBudget
         guard excess > 0 else { return }
 
-        // 按最久未用排序，从最旧的开始丢，直到够为止。
-        let victims = lastUsed.sorted { $0.value < $1.value }.map(\.key)
+        let victims = costs.keys.sorted { lhs, rhs in
+            let heldL = residency.isHeld(lhs), heldR = residency.isHeld(rhs)
+            if heldL != heldR { return !heldL }
+            return (lastUsed[lhs] ?? 0) < (lastUsed[rhs] ?? 0)
+        }
         for key in victims {
             guard excess > 0, entries.count > 1 else { break }
-            excess -= costs[key] ?? 0
+            let held = residency.isHeld(key)
+            let bytes = costs[key] ?? 0
             entries.removeValue(forKey: key)
             costs.removeValue(forKey: key)
             lastUsed.removeValue(forKey: key)
             evictionCount += 1
+            // 被拿着的条目淘汰了也**不省字节**（像素还在图层里），所以不能把它
+            // 算进"已经腾出来的量"——算了的话循环会提前收手，账面看着回到预算内、
+            // 真实内存纹丝不动。
+            if !held { excess -= bytes }
         }
+    }
+
+    // MARK: - 视口外不留全尺寸（§3.9 第 1 条）
+
+    /// 某个素材已经**没有图层在看了**：把它没被拿着的高档位放掉，只留最粗的一档。
+    ///
+    /// ## 为什么需要这一条
+    ///
+    /// 预算是被动淘汰：只有存入新图时才回收。而"看过多少张图"是没有上限的——
+    /// B2 实测的边界正是这个：20 张 4K 全尺寸 632.8 MB > 512 MB 预算，LRU 退化
+    /// 成反复重解（20 张里重解了 19 张）。**退出视口的图不该继续占着全尺寸**，
+    /// 它们下次被看到可能是一分钟后，也可能是永远。
+    ///
+    /// ## 代价（产品负责人已知并接受）
+    ///
+    /// 拖回视口的那一瞬间会先看到一张糊的（图层那边会先贴缓存里剩下的这一张小档），
+    /// 目标档解码完再变清晰。换来的是工作集不随"看过多少张"增长。
+    ///
+    /// ## 为什么留"最便宜的那一档"而不是"最后看的那一档"
+    ///
+    /// 要留的是**回视口时先贴的那一张**：越小越好用——它只在一瞬间被看到，
+    /// 够看清"这是哪张图、大概什么构图"就行。留最后看的那一档等于什么都没省：
+    /// 用户多半是在放大的状态下把它拖出视口的，那一档就是全尺寸。
+    ///
+    /// 留下的那一档还得过 `seedByteCeiling`：最便宜的也超过了上限（比如这张图
+    /// 只解过全尺寸），就**一档都不留**——"不留全尺寸"是硬要求，宁可回视口时
+    /// 空一下，也不能为了"先贴一张"把 31 MB 的全尺寸留在内存里。
+    func demoteUnheldTiers(of asset: AssetID) {
+        let candidates = costs.keys.filter { $0.asset == asset }
+        guard !candidates.isEmpty else { return }
+        // 留哪一档：没人在看的里面**最粗**的那一档（越小越好用，见上面）。写成
+        // 显式循环而不是 `filter/max/filter` 串起来：那一串要表达的是"挑一个，
+        // 然后因为它不合格而放弃挑"，而链式写法读起来像"在结果上再过滤一次"。
+        var keep: Key?
+        for key in candidates where !residency.isHeld(key) {
+            if let current = keep, current.tier.level >= key.tier.level { continue }
+            keep = key
+        }
+        // 最便宜的那一档也超上限（比如这张图只解过全尺寸）就一档都不留。
+        if let key = keep, (costs[key] ?? 0) > (seedByteCeiling ?? 0) { keep = nil }
+        for key in candidates where key != keep {
+            // 被拿着的**一档都不能动**：那个元素可能正显示着它（同一素材在画布上
+            // 出现多次，其中一个离开视口、另一个还在）。
+            guard !residency.isHeld(key) else { continue }
+            demotedBytes += costs[key] ?? 0
+            demotedTierCount += 1
+            entries.removeValue(forKey: key)
+            costs.removeValue(forKey: key)
+            lastUsed.removeValue(forKey: key)
+        }
+    }
+
+    /// 同步取一张**已经在内存里**的、不比 `tier` 更细的图。没有就返回 `nil`。
+    ///
+    /// 取的是"最接近需求的、还留着的那一张"（level 从 `tier.level` 往上找，
+    /// 第一个命中的就是）：拖回视口时贴它。**不走统计**（这里不是一次命中，
+    /// 是一次探测），也**绝不解码**——它在一次同步扫描里被调用，解码会让
+    /// 主线程预算当场破掉（§2.4）。
+    func bestAvailableImage(for asset: AssetID, atMost tier: LODTier) -> (image: CGImage, tier: LODTier)? {
+        var level = tier.level
+        while level <= LODTier.maximumLevel {
+            let candidate = LODTier(level: level)
+            if let image = entries[Key(asset: asset, tier: candidate)] {
+                return (image, candidate)
+            }
+            level += 1
+        }
+        return nil
     }
 
     // MARK: - 内存压力

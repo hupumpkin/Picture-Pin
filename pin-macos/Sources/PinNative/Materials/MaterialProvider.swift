@@ -101,6 +101,23 @@ protocol MaterialProvider: AnyObject {
 
     /// 重新拉取内容。幂等，可以被重复调用（切换来源、点重试都会调）。
     func refresh() async
+
+    /// 条目缩略图。有缩略图的来源（截图）返回经共享 `ImageProvider` 解出的
+    /// 像素；没有的返回 `nil`，行视图退回图标占位。
+    ///
+    /// ## 为什么放在协议上，而不是行视图直接拿 `ImageProvider`
+    ///
+    /// 面板只认来源与提供者（`MaterialSource` 的说明），缩略图同样是
+    /// "内容怎么来"的一部分。更实际的一条：§3.4 的并发闸门只该有一处，
+    /// 行视图各写一份的话，闸门就形同虚设。
+    func thumbnail(for item: MaterialItem, targetPixelSize: CGSize) async -> ImageRequestResult?
+}
+
+extension MaterialProvider {
+    /// 默认没有缩略图：占位提供者与还没实现预览的来源（字体）走这条。
+    func thumbnail(for item: MaterialItem, targetPixelSize: CGSize) async -> ImageRequestResult? {
+        nil
+    }
 }
 
 /// 批次 A 的占位提供者：内容恒为空。

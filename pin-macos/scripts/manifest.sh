@@ -24,8 +24,7 @@ cd "$project_dir"
 # 不排除就会混进去一条永远对不上的记录。
 # 排序保证两次运行的输出逐字节一致——清单本身不可复现的话就没有意义。
 files=$(find . \
-    -path ./.build -prune -o \
-    -path ./build -prune -o \
+    -type d \( -name '.build' -o -name 'build' \) -prune -o \
     -name '.DS_Store' -prune -o \
     -name 'BASELINE-A.sha256' -prune -o \
     -type f -print \
