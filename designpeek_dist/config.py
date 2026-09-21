@@ -2,7 +2,8 @@ import os
 
 # Server
 HOST = "0.0.0.0"
-PORT = 8765
+# 可通过 PIN_PORT 为并行运行的工作区指定端口。
+PORT = int(os.environ.get("PIN_PORT", "8765"))
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
