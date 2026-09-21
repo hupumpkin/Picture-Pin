@@ -198,6 +198,9 @@ final class FileImageProvider: ImageProvider, ImageFileProbing {
     /// 读的是文件头不是像素，所以成本是"打开一次文件"这一档，但它在每次
     /// 素材请求和导入时都会被走到，没有理由放在主线程上。
     private nonisolated static func factsSynchronously(at url: URL) -> ImageFileFacts? {
+        // ImageIO 不负责 SVG；先交给保持原始 XML 的 SVG 适配层。其余格式仍然
+        // 完全沿用 ImageIO，避免为常规位图引入第二条解码路径。
+        if let svgFacts = SVGImageSupport.facts(at: url) { return svgFacts }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               CGImageSourceGetCount(source) > 0,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -252,6 +255,12 @@ final class FileImageProvider: ImageProvider, ImageFileProbing {
         // 这里再认一次，那类情况要落进 `.missing` 而不是 `.failed`。
         guard FileManager.default.fileExists(atPath: url.path) else {
             return DecodeOutcome(result: .missing, ranOffMainThread: !onMainThread)
+        }
+        if SVGImageSupport.isSVG(url: url) {
+            guard let image = SVGImageSupport.rasterize(at: url, maxPixelSize: maxPixelSize) else {
+                return DecodeOutcome(result: .undecodable, ranOffMainThread: !onMainThread)
+            }
+            return DecodeOutcome(result: .decoded(image), ranOffMainThread: !onMainThread)
         }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               CGImageSourceGetCount(source) > 0

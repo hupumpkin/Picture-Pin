@@ -18,6 +18,25 @@ struct AssetID: Hashable, Sendable, Codable {
     init?(string: String) { guard let uuid = UUID(uuidString: string) else { return nil }; self.raw = uuid }
 }
 
+/// 画布图层的稳定标识。图层侧栏尚未开放，但元素与交互不能再假定「画布永远
+/// 只有一个平面」；这一层接口为后续的显隐、锁定、重排保留唯一真源。
+struct CanvasLayerID: Hashable, Sendable, Codable {
+    let raw: UUID
+    init(_ raw: UUID = UUID()) { self.raw = raw }
+}
+
+/// 画布图层的最小领域模型。当前所有已有元素仍处于默认图层，故不触碰现有
+/// SQLite 结构；等图层侧栏落地时再把 `layerID` 写入元素记录，避免为了一个
+/// 尚未可见的面板提前做破坏性迁移。
+struct CanvasLayer: Identifiable, Equatable, Sendable, Codable {
+    let id: CanvasLayerID
+    var name: String
+    var isVisible: Bool
+    var isLocked: Bool
+
+    static let `default` = CanvasLayer(id: CanvasLayerID(), name: "图层 1", isVisible: true, isLocked: false)
+}
+
 /// 画布上的一个元素。
 struct CanvasElement: Identifiable, Equatable, Sendable, Codable {
     enum Kind: Equatable, Sendable, Codable {

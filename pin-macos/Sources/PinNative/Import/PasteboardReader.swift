@@ -28,8 +28,14 @@ struct PasteboardReader: ClipboardReading {
         NSPasteboard.PasteboardType("com.compuserve.gif"),
     ]
 
+    /// 浏览器和设计工具复制矢量图时的标准粘贴板类型。
+    static let svgType = NSPasteboard.PasteboardType("public.svg-image")
+    /// Chromium 等应用会把「复制 SVG」写成纯文本，不声明 `public.svg-image`。
+    /// 只在文本本身通过 SVG 根节点验证时才接受，普通文字绝不会被当素材导入。
+    static let svgTextTypes: [NSPasteboard.PasteboardType] = [.string]
+
     static let acceptedDragTypes: Set<NSPasteboard.PasteboardType> =
-        Set(bitmapTypes + [.fileURL])
+        Set(bitmapTypes + [svgType, .fileURL])
 
     /// 读哪块剪贴板。默认是系统剪贴板；自检传一块私有的（见 `ClipboardReading`）。
     let pasteboard: NSPasteboard
@@ -45,6 +51,17 @@ struct PasteboardReader: ClipboardReading {
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] {
             let files = urls.filter { $0.isFileURL && !isDirectory($0) }
             if !files.isEmpty { return .fileURLs(files) }
+        }
+
+        // SVG 必须排在 TIFF 等预览位图之前：浏览器通常同时放两份数据，选预览
+        // 就会把可编辑的矢量原件悄悄降级成位图。
+        if let data = pasteboard.data(forType: Self.svgType), SVGImageSupport.isSVG(data: data) {
+            return .svg(data: data, suggestedName: Self.suggestedSVGName())
+        }
+        for type in Self.svgTextTypes {
+            if let data = pasteboard.data(forType: type), SVGImageSupport.isSVG(data: data) {
+                return .svg(data: data, suggestedName: Self.suggestedSVGName())
+            }
         }
 
         // 二、位图。PNG 优先（无损、且已经是我们要落盘的格式，不必转码）；
@@ -117,5 +134,12 @@ struct PasteboardReader: ClipboardReading {
         formatter.locale = Locale(identifier: "zh_Hans_CN")
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
         return "粘贴 \(formatter.string(from: now)).png"
+    }
+
+    static func suggestedSVGName(now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_Hans_CN")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return "粘贴 \(formatter.string(from: now)).svg"
     }
 }

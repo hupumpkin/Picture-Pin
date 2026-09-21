@@ -63,6 +63,7 @@ enum SelfTest {
         await importCoordinator()
         await storageRetryAndImportReceipt()
         await clipboardImport()
+        svgStructurePreservesExternalSemantics()
         dropInChannel()
         canvasAcceptsWebImageDrags()
         canvasContextMenuOffersPaste()
@@ -84,6 +85,7 @@ enum SelfTest {
         elementDragAndResize()
         responderChainActionsAreWired()
         undoOfDirectManipulation()
+        selectionUndoAndHistoryLimit()
         panModesAndCursor()
         canvasToolbarBasics()
         await motionAnimationsReachTheTarget()
@@ -3969,6 +3971,35 @@ enum SelfTest {
     /// **全程不碰系统剪贴板**：`PasteboardReader` 收一个 `NSPasteboard`，
     /// 这里给它一块私有的。用 `.general` 的话，一次自检就会把用户正在复制的
     /// 东西顶掉——而这台机器上的用户可能就是正在验收的人。
+    /// 外来 SVG 的分组与元素索引只读识别，保证导入不会抹掉 Figma 等工具留下的
+    /// 结构语义；视觉编辑器依赖这份索引来提供后续可替换的编组导航接口。
+    private static func svgStructurePreservesExternalSemantics() {
+        print("SVG 结构识别（可视编辑器）")
+        let source = """
+        <svg xmlns="http://www.w3.org/2000/svg">
+          <g id="root" data-name="根编组">
+            <g id="chart" inkscape:label="趋势图"><line id="axis" x1="0" y1="0" x2="40" y2="0" stroke="#123456"/></g>
+            <rect id="card" x="1" y="2" width="30" height="20" fill="#fff"/>
+            <text id="title" font-size="18">标题</text>
+          </g>
+        </svg>
+        """
+        let groups = SVGStructure.groups(in: source)
+        expect(groups.count == 2, "识别外部 SVG 的嵌套编组")
+        expect(groups.first?.name == "根编组" && groups.last?.parentID == "root" && groups.last?.depth == 1,
+               "保留编组名称、父级与层级")
+
+        let nodes = SVGStructure.editableNodes(in: source)
+        expect(nodes.map(\.tag) == ["line", "rect", "text"], "识别线条、矩形和文字的可编辑节点")
+        guard let line = nodes.first else {
+            expect(false, "取得线条节点")
+            return
+        }
+        let changed = SVGStructure.updating(source, node: line, attribute: "stroke-width", value: "4.5")
+        expect(changed.contains("stroke-width=\"4.5\""), "更新节点属性时仅改写对应 SVG 标签")
+        expect(changed.contains("<g id=\"root\""), "改写节点属性不破坏外部编组")
+    }
+
     private static func clipboardImport() async {
         print("粘贴通道（§4 第 2 条）")
 
@@ -3994,6 +4025,12 @@ enum SelfTest {
             return
         }
         let sourceFile = probe.writePNG(CGSize(width: 48, height: 32), to: scratch)
+        let svg = Data("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+          <rect width="120" height="80" fill="#0e7490"/>
+          <circle cx="60" cy="40" r="22" fill="#facc15"/>
+        </svg>
+        """.utf8)
 
         // ---- 一、剪贴板里是什么，就分到哪一类 ----
         //
@@ -4006,6 +4043,26 @@ enum SelfTest {
         pasteboard.clearContents()
         pasteboard.setString("这是一段文字，不是图片", forType: .string)
         expect(reader.read() == .none, "剪贴板里只有文字 → 没有可粘的图片")
+
+        // Chromium 有时不声明 `public.svg-image`，而是把同一份 SVG 源码当成
+        // `public.utf8-plain-text` 放进剪贴板。这个用例正是人工复制后「没有
+        // 图片素材」的最小复现，不能只测理想的 SVG UTI。
+        pasteboard.clearContents()
+        pasteboard.setData(svg, forType: .string)
+        guard case .svg(let plainTextSVG, _) = reader.read() else {
+            expect(false, "纯文本 SVG 也识别为矢量素材（Chromium 复制）")
+            return
+        }
+        expect(plainTextSVG == svg, "纯文本通道的 SVG 源码原样保留")
+
+        pasteboard.clearContents()
+        pasteboard.setData(svg, forType: PasteboardReader.svgType)
+        guard case .svg(let roundTrippedSVG, let svgName) = reader.read() else {
+            expect(false, "剪贴板里的 SVG 数据 → 矢量素材那一支")
+            return
+        }
+        expect(roundTrippedSVG == svg, "SVG 源码原样带过来（不降级成 PNG）")
+        expect(svgName.hasSuffix(".svg"), "SVG 的名字带 .svg 后缀", detail: svgName)
 
         if let sourceFile {
             pasteboard.clearContents()
@@ -4165,6 +4222,29 @@ enum SelfTest {
         )) ?? []
         expect(leftoversAfterSecond.isEmpty,
                "带斜杠的那次也把临时文件清掉了", detail: "\(leftoversAfterSecond.count) 个残留")
+
+        // ---- 三·补二、SVG：保留原件，显示时才按当前 LOD 栅格化 ----
+        let svgOutcomes = await coordinator.importClipboard(
+            .svg(data: svg, suggestedName: "可编辑图表.svg"),
+            anchor: CGPoint(x: 180, y: 90)
+        )
+        guard case .imported(let svgRecord) = svgOutcomes.first else {
+            expect(false, "粘贴 SVG 导入成功", detail: svgOutcomes.first?.message ?? "无结果")
+            return
+        }
+        expect(svgRecord.originalFilename == "可编辑图表.svg", "SVG 保留可读文件名")
+        expect(svgRecord.pixelSize == CGSize(width: 120, height: 80),
+               "SVG 从声明中读取画布尺寸", detail: "\(svgRecord.pixelSize)")
+        expect((try? Data(contentsOf: svgRecord.fileURL(in: scratch))) == svg,
+               "素材库保存的是 SVG 原始字节，不是显示用的位图")
+        guard case .image(let renderedSVG) = await provider.image(
+            for: svgRecord.id, targetPixelSize: CGSize(width: 60, height: 40)
+        ) else {
+            expect(false, "SVG 入库后能在画布渲染路径解码")
+            return
+        }
+        expect(renderedSVG.width == 60 && renderedSVG.height == 40,
+               "SVG 按请求的 LOD 栅格化", detail: "\(renderedSVG.width)×\(renderedSVG.height)")
 
         // ---- 四、粘一批文件：走的是同一条流水线 ----
         if let sourceFile {
@@ -6308,9 +6388,13 @@ enum SelfTest {
 
         // 二、缩放也登记。
         coordinator.handleKeyDown(keyInput(53))          // Escape 清空选择
+        // 先点选、再缩放是两个用户事件；选择本身现在也可撤销，不能在这个
+        // 人工合并的“缩放手势”分组里把它一起撤掉。
         gesture(undo) {
             coordinator.handlePointerDown(pointerInput(world: CGPoint(x: 40, y: 30), camera: camera))
             coordinator.handlePointerUp(pointerInput(world: CGPoint(x: 40, y: 30), camera: camera))
+        }
+        gesture(undo) {
             coordinator.handlePointerDown(pointerInput(world: CGPoint(x: 80, y: 60), camera: camera))
             coordinator.handlePointerDragged(pointerInput(world: CGPoint(x: 160, y: 60), camera: camera))
             coordinator.handlePointerUp(pointerInput(world: CGPoint(x: 160, y: 60), camera: camera))
@@ -6381,9 +6465,12 @@ enum SelfTest {
         let orderBefore = layeredCoordinator.scene.elements.map(\.id)
         expect(orderBefore.last == fixture.ids[0], "前置过的元素确实排在最上面")
 
+        // 同理，点击选择与按 Delete 是两个操作；后者撤销后应恢复前者的选择。
         gesture(layeredWindow.undoManager) {
             layeredCoordinator.handlePointerDown(pointerInput(world: CGPoint(x: 20, y: 20), camera: camera))
             layeredCoordinator.handlePointerUp(pointerInput(world: CGPoint(x: 20, y: 20), camera: camera))
+        }
+        gesture(layeredWindow.undoManager) {
             expect(layeredCoordinator.handleKeyDown(keyInput(51)), "Delete 被消费")
         }
         expect(layeredCoordinator.scene.elements.count == 2, "元素被删掉了")
@@ -6408,6 +6495,47 @@ enum SelfTest {
         // 七、换画布清空撤销栈：栈里的记录属于另一块画布。
         coordinator.applySceneFromOutside(CanvasScene())
         expect(!undo.canUndo, "换画布后撤销栈被清空")
+    }
+
+    /// 选择不再只是视觉状态：单击、Escape、框选都走同一份窗口历史；容量则由
+    /// 配置对象注入真实的 `UndoManager`，不是散落在手势控制器里的魔法数字。
+    private static func selectionUndoAndHistoryLimit() {
+        print("选择撤销与历史容量")
+
+        let fixture = makeElementFixture(count: 2)
+        let (coordinator, view, window) = makeWindowedCoordinator(scene: fixture.scene)
+        defer { window.close() }
+        guard let undo = view.window?.undoManager else {
+            expect(false, "选择撤销测试窗口有撤销管理器")
+            return
+        }
+        expect(undo.levelsOfUndo == CanvasUndoConfiguration.default.maximumSteps,
+               "窗口撤销容量来自可配置的默认值（15 步）",
+               detail: "得到 \(undo.levelsOfUndo)")
+
+        let camera = CanvasCamera.initial
+        gesture(undo) {
+            coordinator.handlePointerDown(pointerInput(world: CGPoint(x: 40, y: 30), camera: camera))
+            coordinator.handlePointerUp(pointerInput(world: CGPoint(x: 40, y: 30), camera: camera))
+        }
+        expect(coordinator.selection == [fixture.ids[0]], "点击会选中元素")
+        undo.undo()
+        expect(coordinator.selection.isEmpty, "⌘Z 可撤回一次点击选择")
+        undo.redo()
+        expect(coordinator.selection == [fixture.ids[0]], "⌘⇧Z 可重做选择")
+
+        gesture(undo) {
+            expect(coordinator.handleKeyDown(keyInput(53)), "Escape 清除选择会被消费")
+        }
+        expect(coordinator.selection.isEmpty, "Escape 清除当前选择")
+        undo.undo()
+        expect(coordinator.selection == [fixture.ids[0]], "撤销 Escape 恢复选择")
+
+        gesture(undo) { _ = coordinator.deleteElement(fixture.ids[0]) }
+        expect(coordinator.scene.element(fixture.ids[0]) == nil, "上下文删除进入场景命令")
+        undo.undo()
+        expect(coordinator.scene.element(fixture.ids[0]) != nil, "撤销上下文删除恢复元素")
+        expect(coordinator.selection == [fixture.ids[0]], "撤销上下文删除恢复删除前选择")
     }
 
     private static func panModesAndCursor() {

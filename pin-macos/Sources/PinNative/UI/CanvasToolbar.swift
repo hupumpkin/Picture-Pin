@@ -58,7 +58,7 @@ struct CanvasToolbar: View {
         case .dividerAfterTools, .dividerAfterImport, .dividerAfterFocus, .dividerAfterZoom:
             divider
         case .importImage:
-            iconButton(.imageAdd, "导入图片", enabled: isImportEnabled, action: onImport)
+            iconButton(.imageAdd, "导入图片或 SVG", enabled: isImportEnabled, action: onImport)
         case .focusAll:
             iconButton(.focusAll, "定位到全部内容",
                        enabled: !model.scene.elements.isEmpty, action: onFocusContent)

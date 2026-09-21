@@ -170,6 +170,21 @@ final class LayerRenderer: CanvasRenderer {
         refreshVisibleContent()
     }
 
+    /// 素材原件已被编辑器替换。清掉所有引用它的显示判据后重扫可见元素，
+    /// 不能只清缓存，否则 `displayed == wanted` 会让旧像素一直留在画布上。
+    func reload(asset: AssetID) {
+        for element in elementModels.values {
+            guard case .image(let candidate) = element.kind, candidate == asset else { continue }
+            displayed[element.id] = nil
+            requested[element.id] = nil
+            retryStates[element.id] = nil
+            releaseLayerHold(element.id)
+            elementLayers[element.id]?.contents = nil
+        }
+        assetPixelSizes[asset] = nil
+        refreshVisibleContent()
+    }
+
     /// 视口尺寸变化时同步图层几何。相机的 `viewportSize` 由宿主维护，
     /// 这里只跟随。
     func updateLayerFrames(for viewportSize: CGSize) {
