@@ -178,6 +178,23 @@ final class ImportCoordinator {
                 }
                 return outcome
             }
+        case .svg(let data, let name):
+            let url: URL
+            do {
+                url = try tempWriter.write(data, named: name)
+            } catch {
+                return [.rejected(.failed("这份 SVG 存不下来：\(error.localizedDescription)"))]
+            }
+            defer { tempWriter.cleanUp(url) }
+            let outcomes = await importFiles([url], origin: origin, anchor: anchor)
+            return outcomes.values.map { outcome in
+                if case .imported(let record) = outcome {
+                    var renamed = record
+                    renamed.originalFilename = name
+                    return .imported(renamed)
+                }
+                return outcome
+            }
         }
     }
 

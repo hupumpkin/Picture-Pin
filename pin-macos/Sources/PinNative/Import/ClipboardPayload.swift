@@ -41,6 +41,10 @@ enum ClipboardPayload: Equatable {
     ///     第一帧就会按错误的尺寸摆一次。
     case image(data: Data, suggestedName: String, pixelSize: CGSize)
 
+    /// 剪贴板里的 SVG 源码。与 `.image` 分开，是因为这里的字节必须**原样**
+    /// 保存；把它先绘成 PNG 会让图标可以看、却再也不能编辑路径或图表数据。
+    case svg(data: Data, suggestedName: String)
+
     /// 剪贴板里没有可用的图片。**与"空剪贴板"不是一回事**：复制了一段文字
     /// 也是这一支，而用户需要看到的文案是一样的——"剪贴板里没有图片"。
     case none
@@ -53,7 +57,7 @@ enum ClipboardPayload: Equatable {
     var isEmpty: Bool {
         switch self {
         case .fileURLs(let urls): urls.isEmpty
-        case .image: false
+        case .image, .svg: false
         case .none: true
         }
     }

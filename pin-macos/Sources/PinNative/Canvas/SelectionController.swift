@@ -65,7 +65,10 @@ final class SelectionController {
             startWorld: CGPoint,
             startView: CGPoint,
             collapseOnClick: Bool,
-            toggleOnClick: Bool
+            toggleOnClick: Bool,
+            /// 选择在按下时要立即显示，但只有确认这是“点击”（没有升级为拖动）
+            /// 才登记为独立撤销步骤；拖动时它属于该次直接操控的前置状态。
+            selectionBefore: Set<CanvasElementID>?
         )
         case moving(
             ids: [CanvasElementID],
@@ -79,7 +82,12 @@ final class SelectionController {
             originalFrame: CGRect,
             changed: Bool
         )
-        case marquee(originWorld: CGPoint, base: Set<CanvasElementID>, current: CGRect?)
+        case marquee(
+            originWorld: CGPoint,
+            base: Set<CanvasElementID>,
+            selectionBefore: Set<CanvasElementID>,
+            current: CGRect?
+        )
     }
 
     private var session: Session = .idle
@@ -132,6 +140,8 @@ final class SelectionController {
             // 图却先掉出了选择、而且拖不动"，而锁轴拖动正是用户按 Shift 的目的。
             let shift = input.modifiers.contains(.shift)
             var toggleOnClick = false
+            let selectionBefore = context.selection
+            var selectionChangedOnPress = false
             if shift {
                 if context.selection.contains(hit) {
                     toggleOnClick = true
@@ -139,9 +149,11 @@ final class SelectionController {
                     var next = context.selection
                     next.insert(hit)
                     setSelection(next, context: context)
+                    selectionChangedOnPress = true
                 }
             } else if !context.selection.contains(hit) {
                 setSelection([hit], context: context)
+                selectionChangedOnPress = true
             }
             // 已经多选时点其中一个：**先不收缩**。用户很可能是想拖这一组，
             // 收缩放到松手时——那时才知道这是一次点击而不是一次拖动。
@@ -154,16 +166,23 @@ final class SelectionController {
                 startWorld: input.worldPoint,
                 startView: input.viewPoint,
                 collapseOnClick: collapse,
-                toggleOnClick: toggleOnClick
+                toggleOnClick: toggleOnClick,
+                selectionBefore: selectionChangedOnPress ? selectionBefore : nil
             )
             return
         }
 
         // 3. 空白：框选。按下即清空（Shift 时保留原选择作为底）。
         let additive = input.modifiers.contains(.shift)
+        let selectionBefore = context.selection
         let base = additive ? context.selection : []
         if !additive { setSelection([], context: context) }
-        session = .marquee(originWorld: input.worldPoint, base: base, current: nil)
+        session = .marquee(
+            originWorld: input.worldPoint,
+            base: base,
+            selectionBefore: selectionBefore,
+            current: nil
+        )
         pushOverlay(context: context)
     }
 
@@ -172,7 +191,7 @@ final class SelectionController {
         case .idle:
             break
 
-        case .pressing(_, let startWorld, let startView, _, _):
+        case .pressing(_, let startWorld, let startView, _, _, _):
             // 越过阈值才升级成拖动：这一条就是"点一下不会挪动元素"的保证。
             let moved = hypot(input.viewPoint.x - startView.x, input.viewPoint.y - startView.y)
             guard moved >= Self.dragThreshold else { return }
@@ -196,13 +215,18 @@ final class SelectionController {
             session = .resizing(id: id, handle: handle, originalFrame: original, changed: true)
             pushOverlay(context: context)
 
-        case .marquee(let origin, let base, _):
+        case .marquee(let origin, let base, let selectionBefore, _):
             let rect = SelectionGeometry.rect(from: origin, to: input.worldPoint)
             let hits = Set(context.elements(intersecting: rect))
             // 实时更新：框到哪里高亮到哪里。松手才定稿是另一种手感，
             // 而且框选期间看不到结果就没法中途修正。
             setSelection(base.union(hits), context: context)
-            session = .marquee(originWorld: origin, base: base, current: rect)
+            session = .marquee(
+                originWorld: origin,
+                base: base,
+                selectionBefore: selectionBefore,
+                current: rect
+            )
             pushOverlay(context: context)
         }
     }
@@ -224,7 +248,7 @@ final class SelectionController {
         case .resizing(let id, _, let original, let changed):
             if changed { registerFrameUndo([id: original], actionName: "缩放", context: context) }
 
-        case .pressing(let hit, _, _, let collapse, let toggle):
+        case .pressing(let hit, _, _, let collapse, let toggle, let selectionBefore):
             // 没越过阈值 = 一次点击。两种"按下时不敢做"的收尾都推迟到这里：
             //
             // - `collapse`：多选时点其中一个 → 收缩成这一个；
@@ -238,12 +262,15 @@ final class SelectionController {
             if toggle {
                 var next = context.selection
                 next.remove(hit)
-                setSelection(next, context: context)
+                setSelection(next, context: context, recordUndo: true)
             } else if collapse {
-                setSelection([hit], context: context)
+                setSelection([hit], context: context, recordUndo: true)
+            } else if let selectionBefore {
+                registerSelectionUndo(selectionBefore, context: context)
             }
 
-        case .marquee:
+        case .marquee(_, _, let selectionBefore, _):
+            registerSelectionUndo(selectionBefore, context: context)
             pushOverlay(context: context)   // 清掉框选矩形
 
         case .idle:
@@ -274,7 +301,7 @@ final class SelectionController {
             return deleteSelection(context: context)
         case 53:                            // Escape
             guard !context.selection.isEmpty else { return false }
-            setSelection([], context: context)
+            setSelection([], context: context, recordUndo: true)
             return true
         case 123, 124, 125, 126:            // ← → ↓ ↑
             return nudge(keyCode: input.keyCode, input: input, context: context)
@@ -292,7 +319,7 @@ final class SelectionController {
     func selectAll(context: CanvasContext) -> Bool {
         let all = Set(context.scene.elements.map(\.id))
         guard !all.isEmpty else { return false }
-        setSelection(all, context: context)
+        setSelection(all, context: context, recordUndo: true)
         return true
     }
 
@@ -324,9 +351,22 @@ final class SelectionController {
     private func deleteSelection(context: CanvasContext) -> Bool {
         let elements = orderedSelection(context).compactMap { context.element($0) }
         guard !elements.isEmpty else { return false }
+        let selectionBeforeDelete = context.selection
         context.perform(.remove(elements.map(\.id)))
         setSelection([], context: context)
-        registerDeleteUndo(elements, context: context)
+        registerDeleteUndo(elements, restoringSelection: selectionBeforeDelete, context: context)
+        return true
+    }
+
+    /// 右键菜单删除指定元素。菜单不一定先改变选择，因此不能偷用
+    /// `deleteSelection`；否则用户右键一张未选中的图片，可能删掉的是另一组元素。
+    @discardableResult
+    func deleteElement(_ id: CanvasElementID, context: CanvasContext) -> Bool {
+        guard let element = context.element(id) else { return false }
+        let selectionBeforeDelete = context.selection
+        context.perform(.remove([id]))
+        setSelection(selectionBeforeDelete.subtracting([id]), context: context)
+        registerDeleteUndo([element], restoringSelection: selectionBeforeDelete, context: context)
         return true
     }
 
@@ -421,10 +461,16 @@ final class SelectionController {
 
     // MARK: - 选择与覆盖层
 
-    private func setSelection(_ new: Set<CanvasElementID>, context: CanvasContext) {
+    private func setSelection(
+        _ new: Set<CanvasElementID>,
+        context: CanvasContext,
+        recordUndo: Bool = false
+    ) {
         guard new != context.selection else { return }
+        let previous = context.selection
         context.selection = new
         pushOverlay(context: context)
+        if recordUndo { registerSelectionUndo(previous, context: context) }
     }
 
     /// 重新提交覆盖层。
@@ -439,7 +485,7 @@ final class SelectionController {
         if !isMarqueeing, let id = singleSelection(context) {
             overlay.handleFrame = context.element(id)?.frame
         }
-        if case .marquee(_, _, let current) = session {
+        if case .marquee(_, _, _, let current) = session {
             overlay.marquee = current
         }
         context.overlay = overlay
@@ -483,6 +529,38 @@ final class SelectionController {
             }
         }
         undo.setActionName(actionName)
+    }
+
+    /// 选择也属于用户可见状态：用户明确要求「撤回选中」时，不能只把选择框
+    /// 当作不会入历史的临时装饰。框选的连续更新仍只在开始时登记一次，避免
+    /// 鼠标移动一百帧占满 15 步历史。
+    private func registerSelectionUndo(
+        _ restoreTo: Set<CanvasElementID>,
+        context: CanvasContext
+    ) {
+        guard let undo = context.undoManager else { return }
+        withUndoGroupIfNeeded(undo) {
+            undo.registerUndo(withTarget: self) { controller in
+                MainActor.assumeIsolated { controller.performSelectionUndo(restoring: restoreTo) }
+            }
+            undo.setActionName("选择")
+        }
+    }
+
+    /// 产品窗口按事件自动分组；但离屏自检会主动关闭该行为来验证“每次动作
+    /// 一步”的粒度。选择可以由 Escape 这样的单个按键直接触发，因此这里在
+    /// 后者环境补一个最小分组，避免把同一逻辑变成只在测试里会崩的隐患。
+    private func withUndoGroupIfNeeded(_ undo: UndoManager, _ body: () -> Void) {
+        let needsGroup = !undo.groupsByEvent && undo.groupingLevel == 0
+        if needsGroup { undo.beginUndoGrouping() }
+        body()
+        if needsGroup { undo.endUndoGrouping() }
+    }
+
+    private func performSelectionUndo(restoring restoreTo: Set<CanvasElementID>) {
+        guard let context else { return }
+        registerSelectionUndo(context.selection, context: context)
+        setSelection(restoreTo, context: context)
     }
 
     /// 执行一步"把外框放回去"，并把它的反向登记下来。
@@ -531,34 +609,46 @@ final class SelectionController {
     }
 
     /// 删除的逆操作是"把元素放回来"（连同原顺序），它自己又登记一次删除作为重做。
-    private func registerDeleteUndo(_ elements: [CanvasElement], context: CanvasContext) {
+    private func registerDeleteUndo(
+        _ elements: [CanvasElement],
+        restoringSelection: Set<CanvasElementID>,
+        context: CanvasContext
+    ) {
         guard !elements.isEmpty, let undo = context.undoManager else { return }
         undo.registerUndo(withTarget: self) { controller in
-            MainActor.assumeIsolated { controller.performRestore(elements) }
+            MainActor.assumeIsolated {
+                controller.performRestore(elements, restoringSelection: restoringSelection)
+            }
         }
         undo.setActionName("删除")
     }
 
-    private func performRestore(_ elements: [CanvasElement]) {
+    private func performRestore(_ elements: [CanvasElement], restoringSelection: Set<CanvasElementID>) {
         guard let context else { return }
-        registerRestoreUndo(elements, context: context)
+        registerRestoreUndo(elements, restoringSelection: context.selection, context: context)
         context.perform(.restore(elements))
-        setSelection(Set(elements.map(\.id)), context: context)
+        setSelection(restoringSelection, context: context)
     }
 
-    private func registerRestoreUndo(_ elements: [CanvasElement], context: CanvasContext) {
+    private func registerRestoreUndo(
+        _ elements: [CanvasElement],
+        restoringSelection: Set<CanvasElementID>,
+        context: CanvasContext
+    ) {
         guard !elements.isEmpty, let undo = context.undoManager else { return }
         undo.registerUndo(withTarget: self) { controller in
-            MainActor.assumeIsolated { controller.performRemove(elements) }
+            MainActor.assumeIsolated {
+                controller.performRemove(elements, restoringSelection: restoringSelection)
+            }
         }
         undo.setActionName("删除")
     }
 
-    private func performRemove(_ elements: [CanvasElement]) {
+    private func performRemove(_ elements: [CanvasElement], restoringSelection: Set<CanvasElementID>) {
         guard let context else { return }
-        registerDeleteUndo(elements, context: context)
+        registerDeleteUndo(elements, restoringSelection: context.selection, context: context)
         context.perform(.remove(elements.map(\.id)))
-        setSelection([], context: context)
+        setSelection(restoringSelection, context: context)
     }
 
     /// 自检探针：当前会话是不是空闲。断言用它区分"点击"与"拖动"。

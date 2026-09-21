@@ -220,6 +220,61 @@ struct AssetStore: Sendable {
         }
     }
 
+    /// 用编辑器产生的新 SVG 原文替换同一份素材。画布元素仍引用原来的 `AssetID`，
+    /// 所以不会产生「编辑后画布上的旧元素断开」的第二套迁移逻辑。
+    @MainActor
+    func replaceSVG(
+        _ id: AssetID,
+        with data: Data,
+        using prober: any ImageFileProbing
+    ) async throws -> AssetRecord {
+        guard var record = try await asset(id), record.fileURL(in: root).pathExtension.lowercased() == "svg" else {
+            throw EditError.notEditableSVG
+        }
+        let url = record.fileURL(in: root)
+        let oldData: Data
+        do { oldData = try Data(contentsOf: url) }
+        catch { throw EditError.cannotWrite(error.localizedDescription) }
+        do { try data.write(to: url, options: .atomic) }
+        catch { throw EditError.cannotWrite(error.localizedDescription) }
+        guard let facts = await prober.probe(url) else {
+            try? oldData.write(to: url, options: .atomic)
+            throw EditError.invalidSVG
+        }
+        record.byteCount = data.count
+        record.contentHash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        record.pixelSize = facts.pixelSize
+        record.exifOrientation = facts.exifOrientation
+        let updated = record
+        do {
+            try await database.write { db in
+                try db.execute(sql: """
+                    UPDATE asset SET byte_count = ?, content_hash = ?, pixel_width = ?,
+                    pixel_height = ?, exif_orientation = ? WHERE id = ?
+                    """, arguments: [
+                    updated.byteCount, updated.contentHash, Int(updated.pixelSize.width),
+                    Int(updated.pixelSize.height), updated.exifOrientation, updated.id.raw.uuidString,
+                ])
+            }
+        } catch {
+            try? oldData.write(to: url, options: .atomic)
+            throw EditError.cannotPersist(error.localizedDescription)
+        }
+        return record
+    }
+
+    enum EditError: Error, LocalizedError {
+        case notEditableSVG, invalidSVG, cannotWrite(String), cannotPersist(String)
+        var errorDescription: String? {
+            switch self {
+            case .notEditableSVG: "选中的素材不是可编辑的 SVG"
+            case .invalidSVG: "编辑结果不是可显示的 SVG"
+            case .cannotWrite(let reason): "SVG 写入失败：\(reason)"
+            case .cannotPersist(let reason): "SVG 记录更新失败：\(reason)"
+            }
+        }
+    }
+
     // MARK: - 落点
 
     /// 素材在库里的相对路径：`assets/<id 前两位>/<id>.<ext>`。

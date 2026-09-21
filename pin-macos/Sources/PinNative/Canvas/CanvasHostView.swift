@@ -32,6 +32,8 @@ struct CanvasHostView: NSViewRepresentable {
     let tool: CanvasTool
     let showsGrid: Bool
     let configuration: MotionConfiguration
+    /// 撤销深度是可注入的画布配置；默认值集中在 `CanvasUndoConfiguration`。
+    let undoConfiguration: CanvasUndoConfiguration = .default
     /// 像素从哪来。由 `WorkspaceModel` 持有并注入——**渲染器不自己建一个**，
     /// 否则素材面板和画布会各缓存一份解码结果（见 `ImageCache` 的说明）。
     let images: any ImageProvider
@@ -60,6 +62,10 @@ struct CanvasHostView: NSViewRepresentable {
     /// ⌘V（§4 第 2 条）。**没有落点参数**：粘贴落在视口中心，
     /// 剪贴板里的东西本来就没有"从哪儿拖来"这回事。
     let onPaste: () -> Void
+    /// 编辑入口只对真实 SVG 素材开放；位图虽然同样是画布的 `.image` 元素，
+    /// 但没有 SVG DOM，不能让它们露出一个无效的编辑动作。
+    let canEditSVG: (CanvasElementID) -> Bool
+    let onEditSVG: (CanvasElementID) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
@@ -80,8 +86,13 @@ struct CanvasHostView: NSViewRepresentable {
     func makeNSView(context: Context) -> CanvasHostNSView {
         let view = CanvasHostNSView()
         view.context = context.coordinator
+        view.undoConfiguration = undoConfiguration
+        view.canEditSVG = canEditSVG
+        view.onEditSVG = onEditSVG
         context.coordinator.attach(to: view)
         context.coordinator.setTool(tool)
+        view.undoConfiguration = undoConfiguration
+        view.canEditSVG = canEditSVG
         view.showsGrid = showsGrid
         return view
     }
@@ -305,6 +316,9 @@ struct CanvasHostView: NSViewRepresentable {
             commands.focusSelection = { [weak self] in
                 self?.focusSelection()
             }
+            commands.reloadAsset = { [weak self] asset in
+                self?.renderer.reload(asset: asset)
+            }
         }
 
         func setTool(_ tool: CanvasTool) {
@@ -522,6 +536,13 @@ struct CanvasHostView: NSViewRepresentable {
                 CanvasKeyInput(characters: "a", keyCode: 0, modifiers: [.command], isARepeat: false),
                 context: self
             )
+        }
+
+        /// 上下文菜单的删除也必须进入 `SelectionController`：那里才会登记与
+        /// 键盘 Delete 相同的逆操作，避免右键删除成为唯一不能 ⌘Z 的路径。
+        @discardableResult
+        func deleteElement(_ id: CanvasElementID) -> Bool {
+            input.selectionController.deleteElement(id, context: self)
         }
 
         /// 撤销 / 重做。
@@ -783,6 +804,12 @@ enum CanvasResponderAction {
 /// 只做三件事：转发输入、绘制背景网格、把尺寸变化告诉协调器。
 /// 所有画布状态都在协调器与渲染器里，视图本身不持有相机。
 final class CanvasHostNSView: NSView, NSMenuItemValidation {
+    /// 右键命中的元素。菜单 action 在下一轮事件循环执行，不能届时再按当前
+    /// 鼠标位置命中，否则用户稍微移动鼠标就会删错对象。
+    private var contextMenuElementID: CanvasElementID?
+    var undoConfiguration: CanvasUndoConfiguration = .default
+    var canEditSVG: ((CanvasElementID) -> Bool)?
+    var onEditSVG: ((CanvasElementID) -> Void)?
     weak var context: CanvasHostView.Coordinator?
 
     var showsGrid = true {
@@ -849,6 +876,9 @@ final class CanvasHostNSView: NSView, NSMenuItemValidation {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        // AppKit 的默认值 0 代表无限历史。把容量写进窗口实际使用的
+        // UndoManager，`⌘Z`、菜单和画布手势才会遵循同一条 15 步上限。
+        window?.undoManager?.levelsOfUndo = undoConfiguration.maximumSteps
         context?.updateViewport(
             size: bounds.size,
             backingScaleFactor: window?.backingScaleFactor ?? 2
@@ -884,6 +914,16 @@ final class CanvasHostNSView: NSView, NSMenuItemValidation {
     }
 
     override func mouseDown(with event: NSEvent) {
+        // 双击 SVG 是 Figma 式「钻进内部结构」的入口：画布保持选择模型不变，
+        // 具体的 `<g>` 钻取在编辑窗口内进行（那里才拥有 SVG DOM）。
+        if event.clickCount == 2, let context {
+            let viewPoint = convert(event.locationInWindow, from: nil)
+            if let id = context.hitTest(worldPoint: context.camera.viewToWorld(viewPoint)),
+               canEditSVG?(id) == true {
+                onEditSVG?(id)
+                return
+            }
+        }
         context?.pointerDown(event, button: .left)
     }
 
@@ -927,6 +967,21 @@ final class CanvasHostNSView: NSView, NSMenuItemValidation {
     /// 且各自有快捷键，右键菜单重复一遍只会让"这里该有什么"变得没有标准。
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
+        let viewPoint = convert(event.locationInWindow, from: nil)
+        if let context {
+            contextMenuElementID = context.hitTest(worldPoint: context.camera.viewToWorld(viewPoint))
+            if let id = contextMenuElementID {
+                if canEditSVG?(id) == true {
+                let edit = NSMenuItem(title: "编辑 SVG", action: #selector(editContextSVG(_:)), keyEquivalent: "")
+                edit.target = self
+                menu.addItem(edit)
+                }
+                let delete = NSMenuItem(title: "删除", action: #selector(deleteContextElement(_:)), keyEquivalent: "")
+                delete.target = self
+                menu.addItem(delete)
+                menu.addItem(.separator())
+            }
+        }
         let paste = NSMenuItem(
             title: "粘贴图片", action: #selector(paste(_:)), keyEquivalent: ""
         )
@@ -935,6 +990,17 @@ final class CanvasHostNSView: NSView, NSMenuItemValidation {
         paste.target = self
         menu.addItem(paste)
         return menu
+    }
+
+    @objc private func deleteContextElement(_: Any?) {
+        guard let id = contextMenuElementID, let context else { return }
+        _ = context.deleteElement(id)
+        contextMenuElementID = nil
+    }
+
+    @objc private func editContextSVG(_: Any?) {
+        guard let id = contextMenuElementID, canEditSVG?(id) == true else { return }
+        onEditSVG?(id)
     }
 
     override func rightMouseDragged(with event: NSEvent) {

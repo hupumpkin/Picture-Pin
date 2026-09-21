@@ -16,6 +16,15 @@ import Observation
 @Observable
 final class WorkspaceModel {
 
+    struct SVGEditingDocument: Identifiable {
+        let asset: AssetID
+        var source: String
+        let groups: [SVGGroup]
+        /// Figma 式钻取的当前位置；空表示根 SVG，非空表示当前 `<g>`。
+        var activeGroupID: String?
+        var id: AssetID { asset }
+    }
+
     let environment: AppEnvironment
 
     /// 全部画布与当前画布。本轮只有一块（路线图 §6），但集合是真的。
@@ -37,6 +46,7 @@ final class WorkspaceModel {
     /// Toolbar modes are view state, not part of the saved canvas scene.
     var canvasTool: CanvasTool = .select
     var showsCanvasGrid = true
+    var svgEditingDocument: SVGEditingDocument?
 
     var motionConfiguration: MotionConfiguration
 
@@ -223,6 +233,66 @@ final class WorkspaceModel {
 
     func applySelection(fromCanvas selection: Set<CanvasElementID>) {
         boards.applySelection(selection, for: boards.activeBoardID)
+    }
+
+    var canEditSelectedSVG: Bool {
+        guard selection.count == 1, let id = selection.first else { return false }
+        return canEditSVGElement(id)
+    }
+
+    /// SVG 编辑入口必须按**文件内容**判定，不按画布元素的 `image` 类型猜测。
+    /// 位图和 SVG 在场景里都复用 `.image`，若只看元素种类，右键 PNG/JPEG 也会
+    /// 露出一个点了无反应的「编辑 SVG」。
+    func canEditSVGElement(_ elementID: CanvasElementID) -> Bool {
+        guard let element = scene.element(elementID), case .image(let asset) = element.kind,
+              let url = assetLocator.fileURL(for: asset)
+        else { return false }
+        return SVGImageSupport.isSVG(url: url)
+    }
+
+    func beginEditingSelectedSVG() {
+        guard selection.count == 1, let elementID = selection.first
+        else { return }
+        beginEditingSVGElement(elementID)
+    }
+
+    func beginEditingSVGElement(_ elementID: CanvasElementID) {
+        guard
+              canEditSVGElement(elementID),
+              let element = scene.element(elementID), case .image(let asset) = element.kind,
+              let url = assetLocator.fileURL(for: asset),
+              let data = try? Data(contentsOf: url), let source = String(data: data, encoding: .utf8)
+        else { return }
+        svgEditingDocument = SVGEditingDocument(
+            asset: asset, source: source, groups: SVGStructure.groups(in: source), activeGroupID: nil
+        )
+    }
+
+    func enterSVGGroup(_ groupID: String) {
+        guard var document = svgEditingDocument,
+              document.groups.contains(where: { $0.id == groupID }) else { return }
+        document.activeGroupID = groupID
+        svgEditingDocument = document
+    }
+
+    func exitSVGGroup() {
+        guard var document = svgEditingDocument, let active = document.activeGroupID else { return }
+        document.activeGroupID = document.groups.first(where: { $0.id == active })?.parentID
+        svgEditingDocument = document
+    }
+
+    func saveSVGEditing(_ document: SVGEditingDocument) async -> String? {
+        guard let assets else { return "素材库尚未准备好" }
+        do {
+            _ = try await assets.replaceSVG(document.asset, with: Data(document.source.utf8), using: fileImageProvider)
+            imageCache.invalidateAllTiers(of: document.asset)
+            commands.reloadAsset?(document.asset)
+            await refreshMaterialSources()
+            svgEditingDocument = nil
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 
     /// 建立数据目录结构**并打开库**。可重试——失败原因会显示在界面上。

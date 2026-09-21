@@ -317,6 +317,17 @@ final class ImageCache {
         }
     }
 
+    /// SVG 原件被编辑并回写后，旧的各档位位图都不再可信。这个入口只清缓存
+    /// 自己持有的条目；仍被图层持有的那份会在下一次渲染替换时正常释放。
+    func invalidateAllTiers(of asset: AssetID) {
+        let keys = costs.keys.filter { $0.asset == asset }
+        for key in keys {
+            entries.removeValue(forKey: key)
+            costs.removeValue(forKey: key)
+            lastUsed.removeValue(forKey: key)
+        }
+    }
+
     /// 同步取一张**已经在内存里**的、不比 `tier` 更细的图。没有就返回 `nil`。
     ///
     /// 取的是"最接近需求的、还留着的那一张"（level 从 `tier.level` 往上找，

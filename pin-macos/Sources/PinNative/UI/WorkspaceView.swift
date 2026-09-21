@@ -105,6 +105,11 @@ struct WorkspaceView: View {
             guard case .success(let urls) = result else { return }
             importFiles(urls, origin: .fileImport)
         }
+        .sheet(item: $model.svgEditingDocument) { document in
+            SVGEditorSheet(document: document) { updated in
+                Task { _ = await model.saveSVGEditing(updated) }
+            }
+        }
     }
 
     /// 素材面板本体。
@@ -226,7 +231,9 @@ struct WorkspaceView: View {
                 // 落点交给导入协调器：用户把图拖到哪儿，它就该出现在哪儿。
                 importPayload(payload, origin: .dragIn, anchor: worldPoint)
             },
-            onPaste: { pasteFromClipboard() }
+            onPaste: { pasteFromClipboard() },
+            canEditSVG: { elementID in model.canEditSVGElement(elementID) },
+            onEditSVG: { elementID in model.beginEditingSVGElement(elementID) }
         )
         .overlay(alignment: .bottom) {
             bottomRow
